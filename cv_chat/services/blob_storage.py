@@ -1,5 +1,5 @@
 """Azure Blob Storage: keeps the original uploaded CV files."""
-from azure.core.exceptions import ResourceExistsError
+from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.storage.blob import BlobServiceClient
 
 from cv_chat import config
@@ -21,4 +21,7 @@ def upload_file(name: str, data: bytes) -> None:
 
 
 def list_files() -> list[str]:
-    return sorted(blob.name for blob in _container.list_blobs())
+    try:
+        return sorted(blob.name for blob in _container.list_blobs())
+    except ResourceNotFoundError:  # the container is created on the first ingestion
+        return []
