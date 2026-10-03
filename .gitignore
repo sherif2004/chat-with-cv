@@ -2,3 +2,6 @@
 .venv/
 __pycache__/
 *.pyc
+
+# Local test CVs (personal data, never committed)
+cvs/
