@@ -261,7 +261,7 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 
 - **Uploading the same file again is cheap.** If the content has not changed it is skipped. If it has, its chunks are replaced and any leftover chunks from the old version are deleted.
 - **Same CV under a different file name counts as a different CV.** `cv.pdf` and `cv (1).pdf` are stored separately.
-- **After changing extraction or chunking code or settings**, click **Process CVs** again. The change is detected automatically and the CVs are re-indexed, even though the files are unchanged. (Any edit to `extract.py`, `chunking.py` or `sections.py`, even a comment, counts as a change.)
+- **After changing extraction or chunking code or settings**, click **Update outdated CVs** (under **Manage a CV**), or **Process CVs** with the files again. The change is detected automatically and the CVs are re-indexed, even though the files are unchanged; CVs already up to date are skipped. (Any edit to `extract.py`, `chunking.py` or `sections.py`, even a comment, counts as a change.)
 - **Using an index from an older version of the app:** delete it in the Azure portal (or set a new `AZURE_SEARCH_INDEX` name) and process the CVs again. The new fields (`file_id`, `section_type`, `section`, `page`, `content_hash`) can be added in place, but old chunks do not have them and are never cleaned up.
 - **The first CV is slow.** Docling loads its layout models on first use. After that, extraction takes a few seconds per CV on CPU. A GPU (`DOCLING_DEVICE = "cuda"`) is much faster.
 - **Delete is permanent.** It removes the original file from Blob Storage and the CV from the index.

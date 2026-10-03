@@ -137,6 +137,19 @@ def _manage(cvs: list[str]) -> None:
         with delete_column.popover("Delete", icon=":material/delete:", width="stretch"):
             st.write(f"Delete **{target}** from storage and from search?")
             st.button("Yes, delete", type="primary", icon=":material/delete:", on_click=_delete, args=(target,))
+        st.button(
+            "Update outdated CVs", icon=":material/published_with_changes:", width="stretch", on_click=_update_all, args=(cvs,),
+            help="Check every CV against the current pipeline and re-index only those processed by an older version. "
+            "The status panel shows the unchanged ones as skipped.",
+        )
+
+
+def _update_all(names: list[str]) -> None:
+    """Queue every stored CV without forcing: those the current pipeline already indexed are skipped, the rest are re-indexed."""
+    try:
+        jobs.queue.submit([(name, None) for name in names], force=False)
+    except Exception as error:
+        st.session_state.notice = (f"Could not update the CVs: {str(error).splitlines()[0][:150]}", ":material/error:")
 
 
 def _reindex(name: str) -> None:
