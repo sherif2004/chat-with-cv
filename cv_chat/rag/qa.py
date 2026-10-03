@@ -9,7 +9,7 @@ from typing import NamedTuple
 from cv_chat import config
 from cv_chat.processing.sections import SECTION_TYPES
 from cv_chat.rag import agent, retrieval
-from cv_chat.rag.cache import ANSWER, ROUTE, cache
+from cv_chat.rag.cache import ANSWER, CHAT, ROUTE, cache
 from cv_chat.rag.trace import Trace
 from cv_chat.services import openai_service
 
@@ -79,7 +79,11 @@ def _route(question: str, history: list[dict], trace: Trace | None = None) -> Ro
             trace.add("route", route.kind, (time.perf_counter() - start) * 1000, query=route.query, sections=route.sections, **info)
         return route
 
-    if (cached := cache.get(ROUTE, key)) is not None:
+    alone_key = (question, ())  # a chat message ("hi", "thanks") is classified the same whatever was said before
+    cached = cache.get(ROUTE, key)
+    if cached is None and (alone := cache.get(ROUTE, alone_key)) is not None and alone.kind == "chat":
+        cached = alone
+    if cached is not None:
         return done(cached, cached=True)
     token = cache.token()
     try:
@@ -95,6 +99,8 @@ def _route(question: str, history: list[dict], trace: Trace | None = None) -> Ro
     except Exception:  # routing only improves the search, so a failure must never block the answer
         return done(Route("simple", question, []), cached=False, failed=True)  # not cached: the next try may work
     cache.put(ROUTE, key, route, token)
+    if route.kind == "chat":
+        cache.put(ROUTE, alone_key, route, token)
     return done(route, cached=False)
 
 
@@ -170,6 +176,15 @@ def _guarded(sources: list[dict], messages_for: Callable[[list[dict]], list[dict
         yield from stream
 
 
+def _remember_chat(stream: Iterator[str], question: str, token: int) -> Iterator[str]:
+    """Pass a chat reply through and store it by the message text once it has been written completely."""
+    pieces = []
+    for piece in stream:
+        pieces.append(piece)
+        yield piece
+    cache.put(CHAT, question, "".join(pieces), token)
+
+
 def _remember(stream: Iterator[str], sources: list[dict], route: str, key: tuple, token: int) -> Iterator[str]:
     """Pass the answer through and store it once it has been written completely."""
     pieces = []
@@ -223,8 +238,12 @@ def _answer(question: str, history: list[dict], expand: bool, on_step: Callable[
     log.info("route=%s query=%r sections=%s", route.kind, route.query, route.sections)
     if route.kind == "chat":  # no search, no sources
         on_step("Chat message, no search needed")
+        if (reply := cache.get(CHAT, question)) is not None:  # same text again: no model call at all
+            trace.add("cache", "chat reply cache hit", trace.now_ms())
+            return Answer(iter([reply]), [], "chat")
+        token = cache.token()
         messages = [{"role": "system", "content": CHAT_PROMPT}, *_recent(history), {"role": "user", "content": question}]
-        return Answer(openai_service.chat_stream(messages), [], "chat")
+        return Answer(_remember_chat(openai_service.chat_stream(messages), question, token), [], "chat")
     if route.kind == "complex":  # needs more than the best chunks: let the agent plan its own searches
         on_step("Complex question: planning the searches")
         try:

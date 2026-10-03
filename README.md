@@ -332,7 +332,8 @@ The reasoning, limits and costs behind each part of the chat side.
 
 ### Caching
 
-- **Router results** are cached per question and recent chat, so asking again skips that model call.
+- **Router results** are cached per question and recent chat, so asking again skips that model call. A message the router classified as *chat* ("hi", "thanks") is also cached by its text alone, because it is classified the same whatever was said before.
+- **Chat replies** to such messages are cached by their text alone (always on), so saying "hi" again makes no model call at all.
 - **Search results** are cached per query, section filter and CV filter, so repeats skip the searches and do not use the semantic ranker quota again.
 - **Final answers** can optionally be cached too, only for an identical question with identical chat history (sidebar switch, off by default).
 - **Invalidation.** The whole cache is cleared whenever a CV is processed, re-indexed or deleted, so answers never cite a CV that was removed or changed. A result computed while a CV was changing is not stored. **Clear cache** in the sidebar clears it by hand.

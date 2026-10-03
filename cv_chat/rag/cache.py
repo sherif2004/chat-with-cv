@@ -1,5 +1,6 @@
 """In-memory cache for repeated questions: router results, search results and (optionally) final answers.
 
+Chat replies (greetings, thanks) are cached by their text alone, because they do not depend on the CVs or the chat.
 Everything is cleared when the CVs change. An entry computed while a CV was being changed is not stored (see token).
 """
 import threading
@@ -9,7 +10,7 @@ from typing import Any
 
 from cv_chat import config
 
-ROUTE, SEARCH, ANSWER = "route", "search", "answer"
+ROUTE, SEARCH, ANSWER, CHAT = "route", "search", "answer", "chat"
 
 
 class Cache:
