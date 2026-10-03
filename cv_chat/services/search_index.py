@@ -138,7 +138,7 @@ def hybrid_search(text: str, vector: list[float], k: int, section_types: list[st
     for result in results:
         captions = result.get("@search.captions") or []
         found.append({
-            "file_name": result["file_name"], "section": result["section"], "page": result["page"],
+            "file_name": result["file_name"], "section": result.get("section") or "", "page": result.get("page"),
             "content": result["content"], "caption": captions[0].text if captions and captions[0].text else "",
         })
     return found

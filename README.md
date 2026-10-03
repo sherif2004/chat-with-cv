@@ -24,6 +24,7 @@ Every answer comes from the uploaded CVs and shows which CVs it was based on.
 - [Project structure](#project-structure)
 - [Configuration](#configuration)
 - [Good to know](#good-to-know)
+- [Roadmap](#roadmap)
 - [Troubleshooting](#troubleshooting)
 - [Run the pipeline without the UI](#run-the-pipeline-without-the-ui)
 
@@ -259,6 +260,35 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 - **Broad questions** reach at most 10 chunks, 2 per CV, so a question about a large pile of CVs may not cover every one.
 - **The embedding size is read from your embedding model** when the index is first created, and cannot be changed on an existing index. To switch to a model with a different size, delete the index in the Azure portal (or set a new `AZURE_SEARCH_INDEX` name) and process the CVs again.
 - **Restart Streamlit after editing `.env`.** The file is read once at startup.
+
+---
+
+## Roadmap
+
+Planned improvements to the chat side, in the order they are meant to be built. **None of these exist yet**; the sections above describe what the app does today.
+
+### 1. Router and inline citations
+
+- **Router.** One model call classifies each message as *chat* (greetings, thanks, off-topic: no search), *simple* (one search) or *complex* (see step 3), and rewrites it into a standalone question. It replaces today's rewrite step, so it adds no extra call.
+- **Inline citations.** Answers cite their evidence as `[file name, p.N]` next to each claim, using the page number that is already stored with every chunk. When comparing candidates, each gets their own heading.
+- *Why:* no wasted searches on "hi" or "thanks", and every claim can be traced to a CV and page.
+- *Cost:* very low.
+
+### 2. Query expansion with rank fusion
+
+- The question is expanded into two alternative search queries (one keyword-style, one worded the way a CV would say it). Each query runs the usual hybrid search with semantic re-ranking, and the result lists are merged with reciprocal rank fusion, so a chunk found by several queries rises to the top.
+- A sidebar toggle turns it on and off.
+- *Why:* CVs word the same thing differently ("built APIs" versus "REST services"), so one query can miss relevant chunks.
+- *Cost:* one more model call and three searches per question, so answers start about 1 to 2 seconds later. Each search uses the semantic ranker, which has a monthly query quota on lower tiers.
+
+### 3. Agent for complex questions
+
+- Questions the router marks *complex* (comparing, ranking, counting or listing across many CVs, or questions with several parts) go to a capped tool-using agent with three tools: `search_cvs` (search, optionally limited to some CVs), `get_cv` (read a whole CV) and `list_cvs` (see which CVs exist). It plans its searches, retries with different wording, and answers only from what the tools returned. Its steps are shown while it works.
+- Limits: at most 5 rounds and about 30 seconds.
+- *Why:* ranking or counting needs more than the 10 best chunks. This is the biggest weakness of the current flow, for example "who has the most experience?".
+- *Cost:* several model calls, often 10 to 30 seconds per complex question. Simple questions are not affected.
+
+What stays as it is today: the section filter, the limit of 2 chunks per CV, streamed answers, and delete and re-index.
 
 ---
 

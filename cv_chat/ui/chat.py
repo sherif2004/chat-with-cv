@@ -45,7 +45,6 @@ def _welcome(has_cvs: bool) -> None:
         columns[i % 2].button(
             suggestion,
             icon=":material/arrow_outward:",
-            icon_position="right",
             width="stretch",
             on_click=_suggest,
             args=(suggestion,),

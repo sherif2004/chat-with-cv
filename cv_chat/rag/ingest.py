@@ -71,10 +71,15 @@ def reindex_cv(file_name: str) -> int:
     return chunks
 
 
+def prepare() -> None:
+    """Create the search index, or bring an older one up to the current fields, before anything searches it."""
+    search_index.ensure_index(openai_service.embedding_dimensions())
+
+
 def process_cvs(files: list[tuple[str, bytes]]) -> Iterator[dict]:
     """Process (file_name, data) pairs in parallel and yield each file's result as soon as it finishes."""
     blob_storage.ensure_container()
-    search_index.ensure_index(openai_service.embedding_dimensions())
+    prepare()
     with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as pool:
         futures = {pool.submit(process_cv, name, data): name for name, data in files}
         for future in as_completed(futures):
