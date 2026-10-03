@@ -22,7 +22,6 @@ def _pdf_text(data: bytes) -> str:
 
 def _docx_text(data: bytes) -> str:
     lines = []
-    # Paragraphs and tables in document order: many CV templates lay content out in tables.
     for block in docx.Document(io.BytesIO(data)).iter_inner_content():
         if isinstance(block, Table):
             for row in block.rows:
