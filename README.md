@@ -1,12 +1,17 @@
+<div align="center">
+
 # Chat with CVs
 
 **Upload a pile of CVs, then just ask questions about them.**
-"Who knows Python?", "Compare their cloud skills", "Summarize everyone's education". Every answer comes from the uploaded CVs and shows which CVs it was based on.
+
+Every answer comes from the uploaded CVs and shows which CVs it was based on.
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B?logo=streamlit&logoColor=white)
 ![Azure](https://img.shields.io/badge/Cloud-Azure-0078D4?logo=microsoftazure&logoColor=white)
 ![uv](https://img.shields.io/badge/Env-uv-7C6CF6)
+
+</div>
 
 ---
 
