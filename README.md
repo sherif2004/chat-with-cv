@@ -314,7 +314,7 @@ Improvements to the chat side, in the order they were built. All four steps are 
 
 ### Search boosts and CV metadata
 
-Keyword matching uses a scoring profile (`cv`): a match in the candidate name counts 3 times as much as the same words in the body text, job title and file name 2 times, the section heading 1.5 times, and chunks from the *experience* and *skills* sections get a further boost. The semantic ranker then re-orders the best results as before. The agent's `list_cvs` tool returns every CV with its name, title and years of experience, so ranking by experience needs no reading of CVs.
+Keyword matching uses a scoring profile (`cv`): a match in the candidate name counts 3 times as much as the same words in the body text, job title and file name 2 times, the section heading 1.5 times, and chunks from the *experience* and *skills* sections get a further boost. The semantic ranker then re-orders the best results as before. The agent's `list_cvs` tool returns every CV with its name, title and years of experience, so ranking by experience needs no reading of CVs. Its `search_cvs` tool can also filter by that metadata (`min_years`, `max_years`, `job_title`), for example "backend engineers with at least 10 years"; a CV whose years could not be read never matches a years filter. There is no location filter, because the location field is stored but not filterable.
 
 What stays as it is today: the section filter, the limit of 2 chunks per CV, streamed answers, and delete and re-index.
 

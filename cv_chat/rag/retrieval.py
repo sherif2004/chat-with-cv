@@ -16,16 +16,16 @@ def embed_question(question: str) -> tuple[float, ...]:
     return tuple(openai_service.embed([question])[0])
 
 
-def search(query: str, sections: list[str], file_ids: list[str] | None = None) -> list[dict]:
+def search(query: str, sections: list[str], file_ids: list[str] | None = None, where: str | None = None) -> list[dict]:
     """One hybrid search with semantic re-ranking, limited to the sections when there are enough hits. Cached."""
-    key = (query, tuple(sections), tuple(file_ids or ()))
+    key = (query, tuple(sections), tuple(file_ids or ()), where)
     if (cached := cache.get(SEARCH, key)) is not None:
         return cached
     token = cache.token()
     vector = list(embed_question(query))
-    results = search_index.hybrid_search(query, vector, config.RETRIEVE_K, sections, file_ids)
+    results = search_index.hybrid_search(query, vector, config.RETRIEVE_K, sections, file_ids, where)
     if sections and len(results) < config.MIN_FILTERED_RESULTS:  # the CVs may use unusual headings: search everything
-        results = search_index.hybrid_search(query, vector, config.RETRIEVE_K, file_ids=file_ids)
+        results = search_index.hybrid_search(query, vector, config.RETRIEVE_K, file_ids=file_ids, where=where)
     cache.put(SEARCH, key, results, token)
     return results
 

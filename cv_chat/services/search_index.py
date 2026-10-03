@@ -166,6 +166,18 @@ def list_profiles() -> dict[str, dict]:
     return profiles
 
 
+def metadata_filter(min_years: float | None = None, max_years: float | None = None, job_title: str | None = None) -> str | None:
+    """An OData filter on the CV metadata. CVs whose years could not be read never match a years filter."""
+    parts = []
+    if min_years is not None:
+        parts.append(f"years_experience ge {float(min_years)}")
+    if max_years is not None:
+        parts.append(f"years_experience le {float(max_years)}")
+    if job_title and (words := " ".join(job_title.replace("'", " ").split())):
+        parts.append(f"search.ismatch('{words}', 'job_title', 'simple', 'all')")  # every word must appear in the title
+    return " and ".join(parts) or None
+
+
 def get_cv_chunks(file_id: str) -> list[dict]:
     """Every chunk of one CV in reading order."""
     results = _search_client.search(
@@ -180,18 +192,25 @@ def get_cv_chunks(file_id: str) -> list[dict]:
 
 
 def hybrid_search(
-    text: str, vector: list[float], k: int, section_types: list[str] | None = None, file_ids: list[str] | None = None
+    text: str,
+    vector: list[float],
+    k: int,
+    section_types: list[str] | None = None,
+    file_ids: list[str] | None = None,
+    where: str | None = None,
 ) -> list[dict]:
     """Keyword and vector search in one query, merged, then re-ranked by the semantic ranker.
 
     section_types limits the search to those standard sections (see processing/sections.py);
-    file_ids limits it to those CVs.
+    file_ids limits it to those CVs; where is an extra OData filter (see metadata_filter).
     """
     filters = []
     if section_types:
         filters.append(f"search.in(section_type, '{','.join(section_types)}', ',')")
     if file_ids:
         filters.append(f"search.in(file_id, '{','.join(file_ids)}', ',')")
+    if where:
+        filters.append(f"({where})")
     section_filter = " and ".join(filters) or None
     kwargs = dict(
         search_text=text,
