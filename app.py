@@ -9,6 +9,9 @@ try:
 except KeyError as missing:  # config.py raises KeyError for a value missing from .env
     st.error(f"Missing {missing} in .env. Copy .env.example to .env and fill in your Azure values.", icon=":material/error:")
     st.stop()
+except Exception as error:  # for example a malformed storage connection string
+    st.error(f"Could not connect to Azure: {error}. Check the values in .env.", icon=":material/error:")
+    st.stop()
 
 st.session_state.setdefault("messages", [])
 cvs = sidebar.render()

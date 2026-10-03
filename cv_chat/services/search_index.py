@@ -1,5 +1,8 @@
 """Azure AI Search: the searchable index of CV chunks and their embeddings."""
+import logging
+
 from azure.core.credentials import AzureKeyCredential
+from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
@@ -20,6 +23,7 @@ from azure.search.documents.models import VectorizedQuery
 
 from cv_chat import config
 
+log = logging.getLogger(__name__)
 SEMANTIC_CONFIG = "default"
 
 _credential = AzureKeyCredential(config.SEARCH_KEY)
@@ -27,8 +31,22 @@ _index_client = SearchIndexClient(config.SEARCH_ENDPOINT, _credential)
 _search_client = SearchClient(config.SEARCH_ENDPOINT, config.SEARCH_INDEX, _credential)
 
 
-def ensure_index() -> None:
-    """Create the index, or update it in place if it already exists."""
+def _existing_dimensions() -> int | None:
+    try:
+        index = _index_client.get_index(config.SEARCH_INDEX)
+    except ResourceNotFoundError:
+        return None
+    return next((f.vector_search_dimensions for f in index.fields if f.name == "content_vector"), None)
+
+
+def ensure_index(dimensions: int) -> None:
+    """Create the index (vectors of the given length), or update it in place if it already exists."""
+    existing = _existing_dimensions()
+    if existing is not None and existing != dimensions:
+        raise RuntimeError(
+            f"The index '{config.SEARCH_INDEX}' stores vectors of length {existing}, but the embedding model returns "
+            f"{dimensions}. Delete the index in the Azure portal or set a new AZURE_SEARCH_INDEX in .env, then process the CVs again."
+        )
     fields = [
         SimpleField(name="id", type=SearchFieldDataType.String, key=True),
         SimpleField(name="file_id", type=SearchFieldDataType.String, filterable=True),
@@ -42,7 +60,7 @@ def ensure_index() -> None:
             name="content_vector",
             type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
             searchable=True,
-            vector_search_dimensions=config.EMBEDDING_DIMENSIONS,
+            vector_search_dimensions=dimensions,
             vector_search_profile_name="default",
         ),
     ]
@@ -96,16 +114,26 @@ def hybrid_search(text: str, vector: list[float], k: int, section_types: list[st
     section_filter = None
     if section_types:
         section_filter = f"search.in(section_type, '{','.join(section_types)}', ',')"
-    results = _search_client.search(
+    kwargs = dict(
         search_text=text,
         vector_queries=[VectorizedQuery(vector=vector, k_nearest_neighbors=k, fields="content_vector")],
         filter=section_filter,
-        query_type="semantic",
-        semantic_configuration_name=SEMANTIC_CONFIG,
-        query_caption="extractive|highlight-false",  # the passage the ranker found most relevant, for the Sources list
         select=["file_name", "section", "page", "content"],
         top=k,
     )
+    try:
+        results = list(_search_client.search(
+            query_type="semantic",
+            semantic_configuration_name=SEMANTIC_CONFIG,
+            query_caption="extractive|highlight-false",  # the passage the ranker found most relevant, for Sources
+            **kwargs,
+        ))
+    except HttpResponseError as error:
+        if "semantic" not in str(error).lower():
+            raise
+        # The service has no semantic ranker (Free tier, or switched off): keep answering with plain hybrid search.
+        log.warning("semantic ranker unavailable, using hybrid search only: %s", str(error).splitlines()[0])
+        results = list(_search_client.search(**kwargs))
     found = []
     for result in results:
         captions = result.get("@search.captions") or []

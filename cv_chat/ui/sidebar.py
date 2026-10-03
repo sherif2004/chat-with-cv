@@ -65,7 +65,10 @@ def _list_cvs(show_error: bool = True) -> list[str]:
         return ingest.list_cvs()
     except Exception as error:
         if show_error:
-            st.error(f"Could not list the CVs: {str(error).splitlines()[0]}", icon=":material/error:")
+            st.error(
+                f"Could not list the CVs: {str(error).splitlines()[0]}. Check AZURE_STORAGE_CONNECTION_STRING and AZURE_STORAGE_CONTAINER in .env.",
+                icon=":material/error:",
+            )
         return []
 
 

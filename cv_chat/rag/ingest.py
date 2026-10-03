@@ -3,14 +3,26 @@
 CVs are processed in parallel threads: the work is I/O-bound (HTTP calls to Azure).
 """
 import hashlib
+from functools import lru_cache
+from pathlib import Path
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from cv_chat import config
+from cv_chat.processing import chunking, extract, sections
 from cv_chat.processing.chunking import chunk_cv
 from cv_chat.processing.extract import extract_cv
 from cv_chat.processing.sections import section_type
 from cv_chat.services import blob_storage, openai_service, search_index
+
+
+@lru_cache(maxsize=1)
+def _pipeline_fingerprint() -> bytes:
+    """Changes whenever the extraction or chunking code or its settings change, so those CVs get re-indexed by themselves."""
+    digest = hashlib.md5(f"{config.CHUNK_SIZE}/{config.CHUNK_OVERLAP}".encode())
+    for module in (extract, chunking, sections):
+        digest.update(Path(module.__file__).read_bytes())
+    return digest.digest()
 
 
 def file_id_for(file_name: str) -> str:
@@ -21,7 +33,7 @@ def file_id_for(file_name: str) -> str:
 def process_cv(file_name: str, data: bytes, force: bool = False) -> tuple[int, bool]:
     """Index one CV and store the original file. Returns (chunks, skipped); skipped means it was already indexed."""
     file_id = file_id_for(file_name)
-    content_hash = hashlib.md5(data + str(config.PIPELINE_VERSION).encode()).hexdigest()
+    content_hash = hashlib.md5(data + _pipeline_fingerprint()).hexdigest()
     if not force and search_index.get_hash(file_id) == content_hash:
         return 0, True
 
@@ -62,7 +74,7 @@ def reindex_cv(file_name: str) -> int:
 def process_cvs(files: list[tuple[str, bytes]]) -> Iterator[dict]:
     """Process (file_name, data) pairs in parallel and yield each file's result as soon as it finishes."""
     blob_storage.ensure_container()
-    search_index.ensure_index()
+    search_index.ensure_index(openai_service.embedding_dimensions())
     with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as pool:
         futures = {pool.submit(process_cv, name, data): name for name, data in files}
         for future in as_completed(futures):

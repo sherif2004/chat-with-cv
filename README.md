@@ -65,7 +65,7 @@ flowchart LR
     A --> F[("Azure Blob Storage<br/>original file")]
 ```
 
-1. **Skip unchanged CVs.** Every chunk is stored with a hash of the file content (plus `PIPELINE_VERSION`). If the stored hash matches, the CV is skipped and shown as "already indexed, unchanged".
+1. **Skip unchanged CVs.** Every chunk is stored with a hash of the file content (plus a fingerprint of the extraction and chunking code and settings). If the stored hash matches, the CV is skipped and shown as "already indexed, unchanged".
 2. **Extract with Docling.** [Docling](https://github.com/docling-project/docling) reads the page layout, so multi-column CVs come out in the right reading order, tables become markdown, and section headings are detected. It handles PDF and DOCX. The result is cached on disk in `.cache/extracted/` (by file content), so changing the chunking never runs Docling again.
 3. **Split by section.** The CV is cut at its headings (the ones Docling found, plus short ALL-CAPS lines). Each section becomes one chunk and starts with its heading. Only a section longer than `CHUNK_SIZE` (1500 characters) is split further, with 20% overlap, preferring line breaks. Text before the first heading goes under "Other".
 4. **Label each chunk.** The heading is kept as `section` (as written in the CV) and also mapped to a standard `section_type`: experience, education, skills, projects, summary, certifications, languages, contact or other. The page number is stored too.
@@ -150,16 +150,7 @@ cp .env.example .env
 
 `.env` holds secrets and is git-ignored. Never commit it.
 
-### 4. Check the embedding size
-
-The embedding model decides how long each embedding is, and the search index must be created with the same length. Set `EMBEDDING_DIMENSIONS` in [cv_chat/config.py](cv_chat/config.py):
-
-| Embedding model | `EMBEDDING_DIMENSIONS` |
-|---|---|
-| `text-embedding-3-small`, `text-embedding-ada-002` | `1536` |
-| `text-embedding-3-large` | `3072` |
-
-### 5. Run
+### 4. Run
 
 ```bash
 uv run streamlit run app.py
@@ -237,7 +228,6 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `EMBEDDING_DIMENSIONS` | `3072` | Length of an embedding. Must match the embedding model and the index |
 | `CHUNK_SIZE` | `1500` | Longest chunk in characters. A section shorter than this stays one chunk |
 | `CHUNK_OVERLAP` | `300` | Characters shared between pieces of a long section (20%) |
 | `DOCLING_DEVICE` | `"cpu"` | Where Docling runs. Use `"cuda"` with a GPU for much faster extraction |
@@ -245,7 +235,6 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 | `MAX_WORKERS` | `4` | CVs processed at the same time. Lower it if Azure OpenAI reports rate limits |
 | `EMBED_BATCH` | `16` | Chunks per embedding request |
 | `EMBED_CONCURRENCY` | `2` | Embedding requests in flight at once, across all CVs |
-| `PIPELINE_VERSION` | `2` | Raise it after changing extraction or chunking, so unchanged files are re-indexed |
 | `EXTRACT_CACHE_DIR` | `.cache/extracted` | Where Docling output is saved |
 | `RETRIEVE_K` | `30` | Candidates fetched and re-ranked per question |
 | `MAX_CHUNKS_PER_CV` | `2` | Most chunks one CV can contribute to an answer |
@@ -260,32 +249,36 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 
 - **Uploading the same file again is cheap.** If the content has not changed it is skipped. If it has, its chunks are replaced and any leftover chunks from the old version are deleted.
 - **Same CV under a different file name counts as a different CV.** `cv.pdf` and `cv (1).pdf` are stored separately.
-- **After changing extraction or chunking**, raise `PIPELINE_VERSION` in `config.py` and click **Process CVs** again. Otherwise unchanged files are skipped and keep their old chunks.
+- **After changing extraction or chunking code or settings**, click **Process CVs** again. The change is detected automatically and the CVs are re-indexed, even though the files are unchanged. (Any edit to `extract.py`, `chunking.py` or `sections.py`, even a comment, counts as a change.)
 - **Using an index from an older version of the app:** delete it in the Azure portal (or set a new `AZURE_SEARCH_INDEX` name) and process the CVs again. The new fields (`file_id`, `section_type`, `section`, `page`, `content_hash`) can be added in place, but old chunks do not have them and are never cleaned up.
 - **The first CV is slow.** Docling loads its layout models on first use. After that, extraction takes a few seconds per CV on CPU. A GPU (`DOCLING_DEVICE = "cuda"`) is much faster.
 - **Delete is permanent.** It removes the original file from Blob Storage and the CV from the index.
-- **Scanned PDFs are not supported.** A PDF that is only a picture has no text layer, so it is reported as "No text found". OCR is not set up.
+- **Scanned PDFs go through OCR**, which is slower than reading a text PDF. A PDF with no readable text at all is reported as "No text found".
 - **DOCX files have no page numbers**, so their chunks are stored as page 1.
 - **Each question makes an extra model call** (the rewrite), which adds a little time before the answer starts streaming.
 - **Broad questions** reach at most 10 chunks, 2 per CV, so a question about a large pile of CVs may not cover every one.
-- **The embedding size cannot be changed on an existing index.** To switch embedding models, delete the index in the Azure portal (or set a new `AZURE_SEARCH_INDEX` name) and process the CVs again.
+- **The embedding size is read from your embedding model** when the index is first created, and cannot be changed on an existing index. To switch to a model with a different size, delete the index in the Azure portal (or set a new `AZURE_SEARCH_INDEX` name) and process the CVs again.
 - **Restart Streamlit after editing `.env`.** The file is read once at startup.
 
 ---
 
 ## Troubleshooting
 
-| What you see | Likely cause and fix |
+Most problems now show a message that says what to check. These are the ones you may still meet:
+
+| What you see | What it means and what to do |
 |---|---|
-| `Missing 'AZURE_...' in .env` | A value is missing. Copy `.env.example` to `.env` and fill in every line |
-| `404 Resource not found` while processing | The OpenAI endpoint should be only `https://<name>.openai.azure.com` (no `/openai/v1` at the end). The API version should look like `2024-10-21`, not a model date. The deployment names must match the portal exactly |
-| `No text found (scanned PDF?)` | The PDF is an image. Use a text-based PDF |
-| An error mentioning `semantic` when asking | The search service is on the Free tier, or the semantic ranker is disabled. Use the Basic tier or higher and enable semantic ranker in the portal |
-| A CV was changed but still shows old content | It was skipped as unchanged. Raise `PIPELINE_VERSION` if you changed the pipeline, otherwise check that the file content really changed |
-| Upload fails with an error about vector dimensions | `EMBEDDING_DIMENSIONS` does not match the index. See [Check the embedding size](#4-check-the-embedding-size) and the note in [Good to know](#good-to-know) |
-| `Could not list the CVs` in the sidebar | The storage connection string is wrong or the storage account is not reachable |
-| **Process CVs** is greyed out | No files are selected, or the indexed plus new CVs are still fewer than 8 |
-| The chat input is disabled | Fewer than 8 CVs are in Azure. Process more first |
+| `Missing 'AZURE_...' in .env` | Lists every empty or missing value at once. Copy `.env.example` to `.env`, fill them in and restart the app |
+| `Could not connect to Azure` at start-up | A value in `.env` is malformed, most often the storage connection string. Copy it again from the portal |
+| `Azure OpenAI has no deployment named '...'` | Use the **deployment name** (not the model name) exactly as in the portal. The endpoint is cleaned up for you (a trailing `/openai/v1` is removed), but the API version must look like `2024-10-21` |
+| `The index '...' stores vectors of length N` | The index was created with another embedding model. Delete the index in the Azure portal or set a new `AZURE_SEARCH_INDEX`, then process the CVs again |
+| `No text found (scanned PDF?)` | OCR ran and still found nothing: the file is blank or the image is unreadable. Try a clearer copy |
+| `Could not list the CVs` in the sidebar | The storage connection string or container name is wrong, or the storage account is not reachable |
+| **Process CVs** is greyed out | By design: no files are selected, or the indexed plus new CVs are still fewer than 8. The sidebar says how many more are needed |
+| The chat input is disabled | By design: fewer than 8 CVs are in Azure |
+
+If the search service has no semantic ranker (Free tier, or it is switched off), the app does not fail: it logs a warning and answers with plain hybrid search. Answers are less precisely ranked and Sources show the start of each chunk instead of the best passage.
+
 
 ---
 

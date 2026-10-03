@@ -41,7 +41,10 @@ def _get_converter() -> DocumentConverter:
     """Loaded on first use (the first call downloads/loads the models). Call with _lock held."""
     global _converter
     if _converter is None:
-        options = PdfPipelineOptions(accelerator_options=AcceleratorOptions(device=config.DOCLING_DEVICE))
+        options = PdfPipelineOptions(
+            do_ocr=True,  # scanned PDFs and text inside images
+            accelerator_options=AcceleratorOptions(device=config.DOCLING_DEVICE),
+        )
         _converter = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)})
         _converter.initialize_pipeline(InputFormat.PDF)
     return _converter
