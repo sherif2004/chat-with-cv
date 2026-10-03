@@ -4,12 +4,13 @@ import streamlit as st
 from cv_chat import config
 from cv_chat.rag import ingest, jobs
 from cv_chat.rag.cache import cache
+from cv_chat.ui.safe import esc
 
 
 def render() -> list[str]:
     """Draw the sidebar and return the names of the indexed CVs."""
     if notice := st.session_state.pop("notice", None):  # result of a Manage action, which ran before this rerun
-        st.toast(notice[0], icon=notice[1])
+        st.toast(esc(notice[0]), icon=notice[1])
     with st.sidebar:
         st.markdown("### :material/folder_open: Knowledge base")
         cvs = _list_cvs()
@@ -93,16 +94,16 @@ def _status_panel() -> None:
 
 def _show_job(job: jobs.Job) -> None:
     if job.state == "queued":
-        st.markdown(f":gray[:material/schedule:] **{job.file_name}** · waiting")
+        st.markdown(f":gray[:material/schedule:] **{esc(job.file_name)}** · waiting")
     elif job.state == "processing":
-        st.markdown(f":blue[:material/sync:] **{job.file_name}** · {job.stage}")
+        st.markdown(f":blue[:material/sync:] **{esc(job.file_name)}** · {esc(job.stage)}")
     elif job.state == "indexed":
-        st.markdown(f":green[:material/check_circle:] **{job.file_name}** · {job.chunks} chunks")
+        st.markdown(f":green[:material/check_circle:] **{esc(job.file_name)}** · {job.chunks} chunks")
     elif job.state == "skipped":
-        st.markdown(f":gray[:material/check_circle:] **{job.file_name}** · already indexed, unchanged")
+        st.markdown(f":gray[:material/check_circle:] **{esc(job.file_name)}** · already indexed, unchanged")
     else:
-        st.markdown(f":red[:material/error:] **{job.file_name}**")
-        st.caption((job.error.splitlines() or ["Failed"])[0][:200])
+        st.markdown(f":red[:material/error:] **{esc(job.file_name)}**")
+        st.caption(esc((job.error.splitlines() or ["Failed"])[0][:200]))
 
 
 def _list_cvs(show_error: bool = True) -> list[str]:
@@ -122,7 +123,7 @@ def _show(cvs: list[str]) -> None:
     if cvs:
         with st.container(border=True, height=260 if len(cvs) > 7 else "content"):
             for name in cvs:
-                st.markdown(f":material/description: {name}")
+                st.markdown(f":material/description: {esc(name)}")
 
 
 def _manage(cvs: list[str]) -> None:
@@ -135,7 +136,7 @@ def _manage(cvs: list[str]) -> None:
             help="Process the stored file again, for example after the pipeline changed",
         )
         with delete_column.popover("Delete", icon=":material/delete:", width="stretch"):
-            st.write(f"Delete **{target}** from storage and from search?")
+            st.write(f"Delete **{esc(target)}** from storage and from search?")
             st.button("Yes, delete", type="primary", icon=":material/delete:", on_click=_delete, args=(target,))
         st.button(
             "Update outdated CVs", icon=":material/published_with_changes:", width="stretch", on_click=_update_all, args=(cvs,),
