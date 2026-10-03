@@ -1,4 +1,5 @@
 """Finding CV chunks for a question: embed, hybrid search, merge several searches, spread over CVs."""
+import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -64,7 +65,15 @@ def spread_over_cvs(results: list[dict]) -> list[dict]:
     return picked
 
 
+_TAG = re.compile(r"</?\s*cv_excerpt[^>]*>", re.IGNORECASE)
+
+
 def format_excerpt(chunk: dict) -> str:
-    """A chunk as the model sees it: a header naming its CV, section and page, then the text."""
+    """A chunk as the model sees it: a header naming its CV, section and page, then the text, inside <cv_excerpt> tags.
+
+    The tags mark the text as data (see the system prompts). Tags inside the CV text are removed, so a CV cannot close
+    the block early and pass its own text off as instructions.
+    """
     where = f"{chunk['section']} · p.{chunk['page']}" if chunk.get("page") else chunk["section"]
-    return f"[CV: {chunk['file_name']} · {where}]\n{chunk['content']}"
+    text = _TAG.sub("", f"[CV: {chunk['file_name']} · {where}]\n{chunk['content']}")
+    return f"<cv_excerpt>\n{text}\n</cv_excerpt>"
