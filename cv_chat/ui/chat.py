@@ -92,7 +92,7 @@ def _answer(question: str) -> None:
 
 def _route_note(route: str | None) -> None:
     if route in ROUTE_NOTES:
-        st.caption(ROUTE_NOTES[route], icon=":material/alt_route:")
+        st.caption(f":material/alt_route: {ROUTE_NOTES[route]}")
 
 
 def _sources(sources: list[dict]) -> None:
