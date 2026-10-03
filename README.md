@@ -34,8 +34,8 @@ Every answer comes from the uploaded CVs and shows which CVs it was based on.
 | Step | What you do | What the app does |
 |---|---|---|
 | 1. Upload | Drop PDF or DOCX CVs in the sidebar (at least 8) | Reads and stores them |
-| 2. Process | Click **Process CVs** | Makes their content searchable, several CVs at the same time |
-| 3. Ask | Type a question in the chat | Finds the relevant parts of the CVs and answers from them |
+| 2. Process | Click **Process CVs** | Reads each CV's layout, splits it by section and makes it searchable, several CVs at the same time. CVs that are already indexed and unchanged are skipped |
+| 3. Ask | Type a question in the chat | Finds the relevant parts of the CVs and streams an answer from them |
 | 4. Check | Open **Sources** under an answer | Shows which CVs, and which excerpts, the answer used |
 
 The three required Azure services each have one job:
@@ -43,7 +43,7 @@ The three required Azure services each have one job:
 | Service | Job in this app |
 |---|---|
 | **Azure Blob Storage** | Keeps the original CV files |
-| **Azure AI Search** | Holds the searchable CV content, and finds the parts relevant to a question |
+| **Azure AI Search** | Holds the searchable CV content, finds the parts relevant to a question and re-ranks them (semantic ranker) |
 | **Azure OpenAI** | Turns text into numbers for searching (embeddings) and writes the answers |
 
 ---
@@ -56,39 +56,48 @@ This is a standard "chat with your documents" design, also called **RAG** (retri
 
 ```mermaid
 flowchart LR
-    A["CV file<br/>PDF or DOCX"] --> B["Extract text"]
-    B --> C["Split into chunks<br/>1500 characters"]
+    A["CV file<br/>PDF or DOCX"] --> H{"Already indexed<br/>and unchanged?"}
+    H -- yes --> Z["Skip"]
+    H -- no --> B["Extract with Docling<br/>layout, headings, tables"]
+    B --> C["Split by section"]
     C --> D["Embed each chunk<br/>Azure OpenAI"]
     D --> E[("Azure AI Search<br/>chunks and vectors")]
     A --> F[("Azure Blob Storage<br/>original file")]
 ```
 
-1. **Extract text.** PDFs are read with PyMuPDF, DOCX files with python-docx (including text inside tables).
-2. **Split into chunks.** A CV is too long to search as one piece, so it is cut into chunks of about 1500 characters. Neighbouring chunks overlap by 20% (300 characters), so a sentence that falls on a cut is not lost. The splitter prefers to cut at paragraph breaks, then lines, then words.
-3. **Embed each chunk.** An embedding is a list of numbers that captures the meaning of a text, so texts with similar meaning get similar numbers. Each chunk is sent to Azure OpenAI together with its file name, so even a chunk from page 3 still points to the right CV.
-4. **Save to Azure AI Search.** The chunk text and its embedding are stored in one index.
-5. **Save the original** to Azure Blob Storage.
+1. **Skip unchanged CVs.** Every chunk is stored with a hash of the file content (plus `PIPELINE_VERSION`). If the stored hash matches, the CV is skipped and shown as "already indexed, unchanged".
+2. **Extract with Docling.** [Docling](https://github.com/docling-project/docling) reads the page layout, so multi-column CVs come out in the right reading order, tables become markdown, and section headings are detected. It handles PDF and DOCX. The result is cached on disk in `.cache/extracted/` (by file content), so changing the chunking never runs Docling again.
+3. **Split by section.** The CV is cut at its headings (the ones Docling found, plus short ALL-CAPS lines). Each section becomes one chunk and starts with its heading. Only a section longer than `CHUNK_SIZE` (1500 characters) is split further, with 20% overlap, preferring line breaks. Text before the first heading goes under "Other".
+4. **Label each chunk.** The heading is kept as `section` (as written in the CV) and also mapped to a standard `section_type`: experience, education, skills, projects, summary, certifications, languages, contact or other. The page number is stored too.
+5. **Embed each chunk.** An embedding is a list of numbers that captures the meaning of a text. Each chunk is sent to Azure OpenAI together with its file name, so even a chunk from page 3 still points to the right CV. Requests go out in batches of 16, and a shared limit of 2 requests in flight keeps parallel CVs from hitting rate limits.
+6. **Save to Azure AI Search.** The new chunks are uploaded first, then chunks the new version no longer has are deleted, so a CV is never missing from the index.
+7. **Save the original** to Azure Blob Storage.
 
-Several CVs are processed in parallel (4 at a time). One CV failing, for example a scanned PDF with no text, never stops the others.
+Several CVs are processed in parallel (4 at a time). Docling runs one conversion at a time (its models are not thread-safe), but other CVs can embed and upload while one is being read. One CV failing, for example a scanned PDF with no text, never stops the others.
 
 ### 2. Answering a question (every time you ask)
 
 ```mermaid
 flowchart LR
-    Q["Your question"] --> E["Embed the question"]
-    E --> S[("Azure AI Search<br/>hybrid search")]
-    S --> T["Top 10 most<br/>relevant chunks"]
-    T --> M["Azure OpenAI chat model<br/>question + chunks + recent chat"]
+    Q["Your question<br/>+ recent chat"] --> W["Rewrite question<br/>pick CV sections"]
+    W --> E["Embed the query"]
+    E --> S[("Azure AI Search<br/>hybrid search + semantic ranker")]
+    S --> T["Max 2 chunks per CV<br/>top 10 overall"]
+    T --> M["Azure OpenAI chat model<br/>streams the answer"]
     M --> R["Answer + Sources"]
 ```
 
-1. **Embed the question** the same way as the chunks. Embeddings of repeated questions are cached in memory.
-2. **Hybrid search.** Azure AI Search runs two searches in one query and merges the rankings:
+1. **Rewrite the question.** One quick model call turns a follow-up like "what about his education?" into a standalone search query using the recent chat, and picks which CV sections hold the answer (for example `education`). If this step fails, the original question is used.
+2. **Embed the query** the same way as the chunks. Embeddings of repeated queries are cached in memory.
+3. **Hybrid search, filtered by section.** Azure AI Search runs two searches in one query and merges the rankings:
    - *keyword search* finds exact words, such as a skill, tool or name,
    - *vector search* finds chunks with a similar meaning, even if the words differ ("cloud" finds "Azure").
-3. **Take the 10 best chunks.**
-4. **Ask the chat model.** It receives the chunks, the question and the last few chat messages, and is told to answer only from the chunks and to say so when the answer is not there.
-5. **Show the answer** with a **Sources** list of the CVs it came from.
+
+   When sections were picked, only those sections are searched. If fewer than 3 chunks match (some CVs use unusual headings), it searches everything instead.
+4. **Semantic re-ranking.** Azure's semantic ranker reads the question and each of the top 30 candidates and re-orders them by how well they answer it. It also returns the most relevant passage of each chunk, which is what the Sources list shows.
+5. **Spread over CVs.** Each CV may contribute at most 2 chunks, and the best 10 go on, so a broad question such as "who knows Python?" reaches many CVs instead of one or two.
+6. **Ask the chat model.** It receives the chunks (labelled with CV and section), the question and the last few chat messages, and is told to answer only from the chunks and to say so when the answer is not there. The answer streams into the chat as it is written.
+7. **Show the sources:** the CVs the answer came from, with the best passage of each.
 
 ### What happens when you open the app
 
@@ -107,7 +116,7 @@ flowchart LR
 - [uv](https://docs.astral.sh/uv/) (it installs Python and all packages for you)
 - An Azure account with these resources already created:
   - a **Storage account**
-  - an **Azure AI Search** service (the Free tier is enough)
+  - an **Azure AI Search** service on the **Basic tier or higher** (the semantic ranker is not available on Free)
   - an **Azure OpenAI** resource with two deployments: an **embedding** model (for example `text-embedding-3-large`) and a **chat** model (for example `gpt-4.1-mini`)
 
 ### 2. Install
@@ -156,16 +165,16 @@ The embedding model decides how long each embedding is, and the search index mus
 uv run streamlit run app.py
 ```
 
-The browser opens automatically. The Blob container and the search index are created the first time you process CVs.
+The browser opens automatically. The Blob container and the search index are created the first time you process CVs. The first CV also loads the Docling layout models, which are downloaded on first use, so it takes noticeably longer than the next ones.
 
 ---
 
 ## Using the app
 
 1. **Upload.** In the sidebar, drop at least 8 CVs (PDF or DOCX) into the upload box.
-2. **Process.** Click **Process CVs**. Each file gets a green check and its chunk count as soon as it finishes, or a red mark and the reason if it failed. A progress bar tracks the whole batch.
-3. **Ask.** Type a question, or click one of the suggested questions on the welcome screen.
-4. **Check the sources.** Open **Sources** under an answer to see which CVs it used.
+2. **Process.** Click **Process CVs**. Each file gets a green check and its chunk count as soon as it finishes, a grey check if it was already indexed and unchanged, or a red mark and the reason if it failed. A progress bar tracks the whole batch.
+3. **Ask.** Type a question, or click one of the suggested questions on the welcome screen. The answer streams in as it is written.
+4. **Check the sources.** Open **Sources** under an answer to see which CVs it used and the most relevant passage of each.
 5. **Start over.** **New chat** clears the conversation. It does not delete any CVs.
 
 Your CVs stay in Azure, so they are still there after you close the app. The sidebar lists them again the next time you open it.
@@ -179,20 +188,22 @@ chat-with-cv/
 ├── app.py                    # Streamlit entry point
 ├── .streamlit/config.toml    # dark theme, font, rounded corners
 ├── .env.example              # template for your Azure settings
+├── .cache/                   # saved Docling output (created on first run, git-ignored)
 ├── pyproject.toml            # dependencies (managed by uv)
 ├── uv.lock                   # exact package versions
 └── cv_chat/
     ├── config.py             # reads .env and holds all settings
     ├── services/             # one small file per Azure service
     │   ├── blob_storage.py       # store and list CV files
-    │   ├── search_index.py       # create the index, save chunks, search
-    │   └── openai_service.py     # embeddings and chat answers
-    ├── processing/           # plain Python, no Azure
-    │   ├── extract.py            # PDF / DOCX to text
-    │   └── chunking.py           # text to overlapping chunks
+    │   ├── search_index.py       # create the index, save chunks, hybrid + semantic search
+    │   └── openai_service.py     # batched embeddings, chat answers, streaming
+    ├── processing/           # no Azure
+    │   ├── extract.py            # Docling: PDF / DOCX to pages and headings (cached)
+    │   ├── chunking.py           # pages to section-based chunks
+    │   └── sections.py           # heading to standard section type
     ├── rag/                  # the two pipelines
-    │   ├── ingest.py             # upload flow: extract, chunk, embed, save
-    │   └── qa.py                 # question flow: search, then answer
+    │   ├── ingest.py             # upload flow: skip check, extract, chunk, embed, save
+    │   └── qa.py                 # question flow: rewrite, search, spread over CVs, stream answer
     └── ui/                   # Streamlit screens
         ├── sidebar.py            # upload, process, list of CVs
         ├── chat.py               # conversation and sources
@@ -211,7 +222,7 @@ flowchart TD
 ```
 
 - `services/` talks to Azure and nothing else. Each file wraps one service.
-- `processing/` never touches Azure or Streamlit, so it can be tested on its own.
+- `processing/` never touches Azure or Streamlit, so it can be tested on its own. (`extract.py` needs Docling installed, but nothing else.)
 - `rag/` combines the two into the upload and question pipelines. It never imports Streamlit.
 - `ui/` only draws screens and calls `rag/`.
 
@@ -224,22 +235,34 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 | Setting | Default | Meaning |
 |---|---|---|
 | `EMBEDDING_DIMENSIONS` | `3072` | Length of an embedding. Must match the embedding model and the index |
-| `CHUNK_SIZE` | `1500` | Characters per chunk |
-| `CHUNK_OVERLAP` | `300` | Characters shared between neighbouring chunks (20%) |
+| `CHUNK_SIZE` | `1500` | Longest chunk in characters. A section shorter than this stays one chunk |
+| `CHUNK_OVERLAP` | `300` | Characters shared between pieces of a long section (20%) |
+| `DOCLING_DEVICE` | `"cpu"` | Where Docling runs. Use `"cuda"` with a GPU for much faster extraction |
 | `MAX_WORKERS` | `4` | CVs processed at the same time. Lower it if Azure OpenAI reports rate limits |
-| `TOP_K` | `10` | Chunks retrieved for each question |
-| `HISTORY_MESSAGES` | `6` | Recent chat messages sent along with each question |
-| `EMBED_CACHE_SIZE` | `256` | Question embeddings kept in memory |
+| `EMBED_BATCH` | `16` | Chunks per embedding request |
+| `EMBED_CONCURRENCY` | `2` | Embedding requests in flight at once, across all CVs |
+| `PIPELINE_VERSION` | `2` | Raise it after changing extraction or chunking, so unchanged files are re-indexed |
+| `EXTRACT_CACHE_DIR` | `.cache/extracted` | Where Docling output is saved |
+| `RETRIEVE_K` | `30` | Candidates fetched and re-ranked per question |
+| `MAX_CHUNKS_PER_CV` | `2` | Most chunks one CV can contribute to an answer |
+| `TOP_K` | `10` | Chunks sent to the chat model for each question |
+| `MIN_FILTERED_RESULTS` | `3` | Fewer section-filtered hits than this and the search runs again on all sections |
+| `HISTORY_MESSAGES` | `6` | Recent chat messages used for the rewrite and sent with each question |
+| `EMBED_CACHE_SIZE` | `256` | Query embeddings kept in memory |
 
 ---
 
 ## Good to know
 
-- **Uploading the same file again is safe.** Chunks are saved under a fixed ID built from the file name, so a second upload replaces the first instead of adding duplicates. The only cost is processing the file again.
+- **Uploading the same file again is cheap.** If the content has not changed it is skipped. If it has, its chunks are replaced and any leftover chunks from the old version are deleted.
 - **Same CV under a different file name counts as a different CV.** `cv.pdf` and `cv (1).pdf` are stored separately.
-- **If an edited CV got shorter**, the leftover chunks from the old version stay in the index and can still show up in answers. To clean up, delete the index in the Azure portal and process the CVs again.
-- **Scanned PDFs are not supported.** A PDF that is only a picture has no text to read, so it is reported as "No text found". It would need OCR.
-- **Questions about everyone at once** are limited to the 10 best chunks, so a very broad question may not cover every CV.
+- **After changing extraction or chunking**, raise `PIPELINE_VERSION` in `config.py` and click **Process CVs** again. Otherwise unchanged files are skipped and keep their old chunks.
+- **Using an index from an older version of the app:** delete it in the Azure portal (or set a new `AZURE_SEARCH_INDEX` name) and process the CVs again. The new fields (`file_id`, `section_type`, `section`, `page`, `content_hash`) can be added in place, but old chunks do not have them and are never cleaned up.
+- **The first CV is slow.** Docling loads its layout models on first use. After that, extraction takes a few seconds per CV on CPU. A GPU (`DOCLING_DEVICE = "cuda"`) is much faster.
+- **Scanned PDFs are not supported.** A PDF that is only a picture has no text layer, so it is reported as "No text found". OCR is not set up.
+- **DOCX files have no page numbers**, so their chunks are stored as page 1.
+- **Each question makes an extra model call** (the rewrite), which adds a little time before the answer starts streaming.
+- **Broad questions** reach at most 10 chunks, 2 per CV, so a question about a large pile of CVs may not cover every one.
 - **The embedding size cannot be changed on an existing index.** To switch embedding models, delete the index in the Azure portal (or set a new `AZURE_SEARCH_INDEX` name) and process the CVs again.
 - **Restart Streamlit after editing `.env`.** The file is read once at startup.
 
@@ -252,6 +275,8 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 | `Missing 'AZURE_...' in .env` | A value is missing. Copy `.env.example` to `.env` and fill in every line |
 | `404 Resource not found` while processing | The OpenAI endpoint should be only `https://<name>.openai.azure.com` (no `/openai/v1` at the end). The API version should look like `2024-10-21`, not a model date. The deployment names must match the portal exactly |
 | `No text found (scanned PDF?)` | The PDF is an image. Use a text-based PDF |
+| An error mentioning `semantic` when asking | The search service is on the Free tier, or the semantic ranker is disabled. Use the Basic tier or higher and enable semantic ranker in the portal |
+| A CV was changed but still shows old content | It was skipped as unchanged. Raise `PIPELINE_VERSION` if you changed the pipeline, otherwise check that the file content really changed |
 | Upload fails with an error about vector dimensions | `EMBEDDING_DIMENSIONS` does not match the index. See [Check the embedding size](#4-check-the-embedding-size) and the note in [Good to know](#good-to-know) |
 | `Could not list the CVs` in the sidebar | The storage connection string is wrong or the storage account is not reachable |
 | **Process CVs** is greyed out | No files are selected in the upload box |
@@ -267,4 +292,4 @@ Handy for debugging. Put some CVs in a local `cvs/` folder (it is git-ignored) a
 uv run python -c "from pathlib import Path; from cv_chat.rag.ingest import process_cvs; [print(r) for r in process_cvs([(p.name, p.read_bytes()) for p in Path('cvs').iterdir()])]"
 ```
 
-Each CV prints its chunk count, or the error that stopped it.
+Each CV prints its chunk count, whether it was skipped as unchanged, or the error that stopped it.
