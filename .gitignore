@@ -5,3 +5,4 @@ __pycache__/
 
 # Local test CVs (personal data, never committed)
 cvs/
+.cache/

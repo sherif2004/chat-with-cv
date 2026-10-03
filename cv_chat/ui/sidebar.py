@@ -34,6 +34,8 @@ def _process(files) -> None:
                     failed += 1
                     st.markdown(f":red[:material/error:] **{result['file']}**")
                     st.caption(result["error"].splitlines()[0][:200])
+                elif result["skipped"]:
+                    st.markdown(f":gray[:material/check_circle:] **{result['file']}** · already indexed, unchanged")
                 else:
                     st.markdown(f":green[:material/check_circle:] **{result['file']}** · {result['chunks']} chunks")
                 progress.progress(done / total, text=f"{done} of {total} done")

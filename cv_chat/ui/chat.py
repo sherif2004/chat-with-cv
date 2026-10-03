@@ -67,11 +67,11 @@ def _answer(question: str) -> None:
     with st.chat_message("assistant", avatar=AVATARS["assistant"]):
         try:
             with st.spinner("Searching the CVs..."):
-                answer, sources = qa.ask(question, history)
+                stream, sources = qa.ask(question, history)
+            answer = st.write_stream(stream)
         except Exception as error:
             st.error(f"Could not answer: {str(error).splitlines()[0]}", icon=":material/error:")
             return
-        st.markdown(answer)
         _sources(sources)
     st.session_state.messages += [
         {"role": "user", "content": question},
@@ -85,7 +85,7 @@ def _sources(sources: list[dict]) -> None:
         return
     excerpts: dict[str, list[str]] = {}
     for source in sources:
-        excerpts.setdefault(source["file_name"], []).append(source["content"])
+        excerpts.setdefault(source["file_name"], []).append(source.get("caption") or source["content"])
     with st.expander(f"Sources · {len(excerpts)} CV{'' if len(excerpts) == 1 else 's'}", icon=":material/menu_book:"):
         for file_name, contents in excerpts.items():
             st.markdown(f":material/description: **{file_name}** · {len(contents)} excerpt{'' if len(contents) == 1 else 's'}")
