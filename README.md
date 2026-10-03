@@ -319,6 +319,7 @@ Most problems now show a message that says what to check. These are the ones you
 | What you see | What it means and what to do |
 |---|---|
 | `Missing 'AZURE_...' in .env` | Lists every empty or missing value at once. Copy `.env.example` to `.env`, fill them in and restart the app |
+| `The index '...' was made by an older version` | The index settings changed (English text analyzer, filterable file names, explicit cosine metric) and Azure cannot change these in place. Delete the index in the Azure portal, or set a new `AZURE_SEARCH_INDEX` in `.env`, restart the app, then open **Manage a CV** and click **Update outdated CVs** to index the stored CVs again |
 | `Could not connect to Azure` at start-up | A value in `.env` is malformed, most often the storage connection string. Copy it again from the portal |
 | `Azure OpenAI has no deployment named '...'` | Use the **deployment name** (not the model name) exactly as in the portal. The endpoint is cleaned up for you (a trailing `/openai/v1` is removed), but the API version must look like `2024-10-21` |
 | `The index '...' stores vectors of length N` | The index was created with another embedding model. Delete the index in the Azure portal or set a new `AZURE_SEARCH_INDEX`, then process the CVs again |

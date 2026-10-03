@@ -7,6 +7,7 @@ from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
     HnswAlgorithmConfiguration,
+    HnswParameters,
     SearchableField,
     SearchField,
     SearchFieldDataType,
@@ -25,37 +26,59 @@ from cv_chat import config
 
 log = logging.getLogger(__name__)
 SEMANTIC_CONFIG = "default"
+ANALYZER = "en.microsoft"  # English stemming and stop words for keyword search ("built" also finds "building")
 
 _credential = AzureKeyCredential(config.SEARCH_KEY)
 _index_client = SearchIndexClient(config.SEARCH_ENDPOINT, _credential)
 _search_client = SearchClient(config.SEARCH_ENDPOINT, config.SEARCH_INDEX, _credential)
 
 
-def _existing_dimensions() -> int | None:
+def _existing_index() -> SearchIndex | None:
     try:
-        index = _index_client.get_index(config.SEARCH_INDEX)
+        return _index_client.get_index(config.SEARCH_INDEX)
     except ResourceNotFoundError:
         return None
-    return next((f.vector_search_dimensions for f in index.fields if f.name == "content_vector"), None)
+
+
+def _outdated_settings(index: SearchIndex) -> list[str]:
+    """Settings the index was created with that Azure cannot change in place. Empty when the index is current."""
+    fields = {field.name: field for field in index.fields}
+    problems = []
+    if getattr(fields.get("content"), "analyzer_name", None) != ANALYZER:
+        problems.append(f"the text analyzer of 'content' is not {ANALYZER}")
+    if not getattr(fields.get("file_name"), "filterable", False):
+        problems.append("'file_name' is not filterable")
+    algorithms = index.vector_search.algorithms if index.vector_search else []
+    if not any(getattr(a.parameters, "metric", None) == "cosine" for a in algorithms):
+        problems.append("the vector similarity metric is not cosine")
+    return problems
 
 
 def ensure_index(dimensions: int) -> None:
     """Create the index (vectors of the given length), or update it in place if it already exists."""
-    existing = _existing_dimensions()
-    if existing is not None and existing != dimensions:
-        raise RuntimeError(
-            f"The index '{config.SEARCH_INDEX}' stores vectors of length {existing}, but the embedding model returns "
-            f"{dimensions}. Delete the index in the Azure portal or set a new AZURE_SEARCH_INDEX in .env, then process the CVs again."
-        )
+    existing = _existing_index()
+    if existing is not None:
+        existing_dimensions = next((f.vector_search_dimensions for f in existing.fields if f.name == "content_vector"), None)
+        if existing_dimensions is not None and existing_dimensions != dimensions:
+            raise RuntimeError(
+                f"The index '{config.SEARCH_INDEX}' stores vectors of length {existing_dimensions}, but the embedding model returns "
+                f"{dimensions}. Delete the index in the Azure portal or set a new AZURE_SEARCH_INDEX in .env, then process the CVs again."
+            )
+        if problems := _outdated_settings(existing):
+            raise RuntimeError(
+                f"The index '{config.SEARCH_INDEX}' was made by an older version: {'; '.join(problems)}. Azure cannot change "
+                "this in place. Delete the index in the Azure portal (or set a new AZURE_SEARCH_INDEX in .env), restart the app, "
+                "then click Update outdated CVs to index the stored CVs again."
+            )
     fields = [
         SimpleField(name="id", type=SearchFieldDataType.String, key=True),
         SimpleField(name="file_id", type=SearchFieldDataType.String, filterable=True),
-        SearchableField(name="file_name"),  # keyword search also matches names in file names
+        SearchableField(name="file_name", filterable=True),  # keyword search also matches names in file names
         SimpleField(name="section", type=SearchFieldDataType.String, filterable=True, facetable=True),
         SimpleField(name="section_type", type=SearchFieldDataType.String, filterable=True),
         SimpleField(name="page", type=SearchFieldDataType.Int32, filterable=True),
         SimpleField(name="content_hash", type=SearchFieldDataType.String),
-        SearchableField(name="content"),
+        SearchableField(name="content", analyzer_name=ANALYZER),
         SearchField(
             name="content_vector",
             type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
@@ -65,7 +88,7 @@ def ensure_index(dimensions: int) -> None:
         ),
     ]
     vector_search = VectorSearch(
-        algorithms=[HnswAlgorithmConfiguration(name="hnsw")],
+        algorithms=[HnswAlgorithmConfiguration(name="hnsw", parameters=HnswParameters(metric="cosine"))],
         profiles=[VectorSearchProfile(name="default", algorithm_configuration_name="hnsw")],
     )
     semantic_search = SemanticSearch(configurations=[SemanticConfiguration(
@@ -73,6 +96,7 @@ def ensure_index(dimensions: int) -> None:
         prioritized_fields=SemanticPrioritizedFields(
             title_field=SemanticField(field_name="file_name"),
             content_fields=[SemanticField(field_name="content")],
+            keywords_fields=[SemanticField(field_name="section")],  # the heading tells the ranker what the text is about
         ),
     )])
     _index_client.create_or_update_index(
