@@ -289,6 +289,15 @@ Planned improvements to the chat side, in the order they are meant to be built. 
 - *Why:* ranking or counting needs more than the 10 best chunks. This is the biggest weakness of the current flow, for example "who has the most experience?".
 - *Cost:* several model calls, often 10 to 30 seconds per complex question. Simple questions are not affected.
 
+### 4. Caching repeated questions
+
+- **Rewrite / router result** is cached per question and recent chat, so asking again skips that model call.
+- **Search results** are cached per query and section filter, so repeats skip the searches and do not use the semantic ranker quota again.
+- **Final answers** can optionally be cached too, only for an identical question with identical chat history. This is off by default, because a cached answer can be out of date.
+- **Invalidation.** The whole cache is cleared whenever a CV is processed, re-indexed or deleted, so answers never cite a CV that was removed or changed. A **Clear cache** button in the sidebar clears it by hand.
+- *Why:* repeated and slightly re-asked questions answer faster and cost less.
+- *Cost:* low. The existing in-memory cache of query embeddings (`EMBED_CACHE_SIZE`) stays.
+
 What stays as it is today: the section filter, the limit of 2 chunks per CV, streamed answers, and delete and re-index.
 
 ---
