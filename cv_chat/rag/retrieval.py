@@ -59,13 +59,15 @@ def fuse(result_lists: list[list[dict]]) -> list[dict]:
     return [chunks[key] for key, _ in scores.most_common()]
 
 
-def retrieve(queries: list[str], sections: list[str], trace: Trace | None = None) -> list[dict]:
-    """Search every query (the first is the main one), merge the lists and keep the best chunks."""
+def retrieve(
+    queries: list[str], sections: list[str], trace: Trace | None = None, file_ids: list[str] | None = None
+) -> list[dict]:
+    """Search every query (the first is the main one), merge the lists and keep the best chunks. file_ids limits it to those CVs."""
     if len(queries) == 1:
-        results = search(queries[0], sections, trace=trace)
+        results = search(queries[0], sections, file_ids, trace=trace)
     else:
         with ThreadPoolExecutor(max_workers=len(queries)) as pool:
-            results = fuse(list(pool.map(lambda query: search(query, sections, trace=trace), queries)))
+            results = fuse(list(pool.map(lambda query: search(query, sections, file_ids, trace=trace), queries)))
     return spread_over_cvs(results)
 
 

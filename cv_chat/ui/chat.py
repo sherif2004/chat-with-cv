@@ -79,7 +79,8 @@ def _answer(question: str) -> None:
             with st.status("Reading your question...", expanded=True) as status:
                 stream, sources, route, trace = qa.ask(
                     question, history, expand=st.session_state.get("expand_queries", False),
-                    cache_answers=st.session_state.get("cache_answers", False), on_step=lambda step: st.write(safe.esc(step))
+                    cache_answers=st.session_state.get("cache_answers", False), on_step=lambda step: st.write(safe.esc(step)),
+                    scope=st.session_state.get("chat_scope", []),
                 )
                 status.update(label="Done", state="complete", expanded=False)
             answer = st.write_stream(safe.no_images(stream))

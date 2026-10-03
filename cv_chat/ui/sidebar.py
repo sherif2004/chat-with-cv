@@ -31,6 +31,9 @@ def render() -> list[str]:
         if cvs:
             _manage(cvs)
 
+        if cvs:
+            _scope(cvs)
+
         st.toggle(
             "Query expansion", key="expand_queries",
             help="Also search two reworded versions of each question and merge the results. "
@@ -124,6 +127,15 @@ def _show(cvs: list[str]) -> None:
         with st.container(border=True, height=260 if len(cvs) > 7 else "content"):
             for name in cvs:
                 st.markdown(f":material/description: {esc(name)}")
+
+
+def _scope(cvs: list[str]) -> None:
+    """Choose which CVs the chat answers from. Nothing selected means all of them."""
+    st.session_state.chat_scope = [name for name in st.session_state.get("chat_scope", []) if name in cvs]  # drop deleted CVs
+    st.multiselect(
+        "Chat with", cvs, key="chat_scope", placeholder="All CVs",
+        help="Pick one or more CVs to answer only from them. Leave empty to search all CVs.",
+    )
 
 
 def _manage(cvs: list[str]) -> None:

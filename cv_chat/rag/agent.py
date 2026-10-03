@@ -59,8 +59,9 @@ TOOLS = [
 class _Run:
     """One agent run: executes the tools and remembers every excerpt it showed the model, for the Sources list."""
 
-    def __init__(self, on_step: Callable[[str], None], trace: Trace | None = None):
+    def __init__(self, on_step: Callable[[str], None], trace: Trace | None = None, scope: list[str] | None = None):
         self.on_step = on_step
+        self.scope = scope or []  # the CVs the user selected; empty means all
         self.trace = trace or Trace()
         self.sources: dict[tuple, dict] = {}
 
@@ -90,7 +91,7 @@ class _Run:
 
     def _list_cvs(self) -> str:
         """Every CV with its name, title and years of experience, so ranking by experience needs no reading."""
-        names = ingest.list_cvs()
+        names = [name for name in ingest.list_cvs() if not self.scope or name in self.scope]
         try:
             profiles = search_index.list_profiles()
         except Exception:  # the plain list is still useful
@@ -102,6 +103,10 @@ class _Run:
         self, query: str, cvs: list[str], per_cv: int | None,
         min_years: float | None = None, max_years: float | None = None, job_title: str | None = None,
     ) -> str:
+        if self.scope:  # the user chose which CVs to talk to: the model cannot search outside them
+            cvs = [name for name in cvs if name in self.scope] if cvs else list(self.scope)
+            if not cvs:
+                return "Error: those CVs are not selected. Search only the CVs from list_cvs."
         limits = [f"{len(cvs)} CV{'' if len(cvs) == 1 else 's'}"] if cvs else []
         limits += [f"{n}+ years" for n in [min_years] if n is not None] + [f"up to {n} years" for n in [max_years] if n is not None]
         limits += [f"title: {job_title}"] if job_title else []
@@ -117,6 +122,8 @@ class _Run:
         return f"{found} CV{'' if found == 1 else 's'} matched{note}.\n\n" + self._show(results)
 
     def _get_cv(self, file_name: str) -> str:
+        if self.scope and file_name not in self.scope:
+            return f"Error: no CV named '{file_name}'. Use a file name from list_cvs."
         self.on_step(f"Reading {file_name}")
         chunks = search_index.get_cv_chunks(ingest.file_id_for(file_name))
         if not chunks:
@@ -132,11 +139,12 @@ class _Run:
 
 
 def run(
-    question: str, recent: list[dict], on_step: Callable[[str], None], trace: Trace | None = None, original: str = ""
+    question: str, recent: list[dict], on_step: Callable[[str], None], trace: Trace | None = None, original: str = "",
+    scope: list[str] | None = None,
 ) -> tuple[Iterator[str], list[dict]]:
     """Let the model plan and run searches for at most AGENT_MAX_ROUNDS rounds and AGENT_MAX_SECONDS seconds,
     then return (answer as a stream, sources). Out of budget, it answers from what it has found so far."""
-    state = _Run(on_step, trace)
+    state = _Run(on_step, trace, scope)
     asked = question if not original or original == question else (
         f"{question}\n\n(The user's original message, whose language your answer must use: {original})"
     )
