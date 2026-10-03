@@ -99,7 +99,10 @@ def _route(question: str, history: list[dict], trace: Trace | None = None) -> Ro
     except Exception:  # routing only improves the search, so a failure must never block the answer
         return done(Route("simple", question, []), cached=False, failed=True)  # not cached: the next try may work
     cache.put(ROUTE, key, route, token)
-    if route.kind == "chat":  # stored without the rewritten query, which may contain details from this chat
+    if route.kind == "chat" and not recent:
+        # Shared by every session, so only a decision made from the message alone goes in (a chat history could have steered
+        # the router, and would then change how other users' identical question is handled). The rewritten query is left out
+        # because it may contain details from this chat.
         cache.put(ROUTE, alone_key, Route("chat", question, []), token)
     return done(route, cached=False)
 

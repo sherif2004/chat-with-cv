@@ -296,7 +296,7 @@ The search index settings (text analyzer `en.microsoft`, field weights, boosted 
 - **Years of experience are an estimate** read by a model from the dated jobs ("Present" counts as today). A CV whose years could not be read never matches a years filter.
 - **Contact details are personal data.** Email, phone and location are stored as fields in the search index, next to the CV text. Anyone with the search key can read them.
 - **There is no login.** Anyone who can open the app sees every CV. Put it behind your own authentication before using real candidate data.
-- **The caches live in the memory of the app process.** They are empty after a restart and are not shared between several copies of the app.
+- **The caches live in the memory of the app process.** They are empty after a restart and are not shared between several copies of the app, but every browser session of one running app shares them. Entries that depend on a conversation (router results, final answers) include the recent chat in their key, so only an identical conversation can reuse them.
 - **The embedding size is read from your embedding model** when the index is first created, and cannot be changed on an existing index. To switch to a model with a different size, delete the index in the Azure portal (or set a new `AZURE_SEARCH_INDEX` name) and process the CVs again.
 - **Restart Streamlit after editing `.env`.** The file is read once at startup.
 
@@ -332,8 +332,8 @@ The reasoning, limits and costs behind each part of the chat side.
 
 ### Caching
 
-- **Router results** are cached per question and recent chat, so asking again skips that model call. A message the router classified as *chat* ("hi", "thanks") is also cached by its text alone, because it is classified the same whatever was said before.
-- **Chat replies** to such messages are cached by their text alone (always on), so saying "hi" again makes no model call at all.
+- **Router results** are cached per question and recent chat, so asking again skips that model call. A message that opens a chat and that the router classifies as *chat* ("hi", "thanks") is also cached by its text alone, so it is recognised again later in any chat. Decisions made with a chat history are never shared this way.
+- **Chat replies** to such messages are cached by their text alone (always on), so saying "hi" again makes no model call at all. These replies are written without the chat history, so nothing from one conversation can reach another.
 - **Search results** are cached per query, section filter and CV filter, so repeats skip the searches and do not use the semantic ranker quota again.
 - **Final answers** can optionally be cached too, only for an identical question with identical chat history (sidebar switch, off by default).
 - **Invalidation.** The whole cache is cleared whenever a CV is processed, re-indexed or deleted, so answers never cite a CV that was removed or changed. A result computed while a CV was changing is not stored. **Clear cache** in the sidebar clears it by hand.
