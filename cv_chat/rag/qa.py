@@ -18,5 +18,21 @@ def embed_question(question: str) -> tuple[float, ...]:
 
 
 def ask(question: str, history: list[dict]) -> tuple[str, list[dict]]:
-    # TODO for Abdeltawab
-    pass
+    """Answer a question using the most relevant indexed CV excerpts."""
+    sources = search_index.hybrid_search(question, list(embed_question(question)), config.TOP_K)
+    if not sources:
+        return "I couldn't find any relevant excerpts in the uploaded CVs.", []
+
+    excerpts = "\n\n".join(
+        f"CV: {source['file_name']}\nExcerpt:\n{source['content']}" for source in sources
+    )
+    recent_history = [
+        {"role": message["role"], "content": message["content"]}
+        for message in history[-config.HISTORY_MESSAGES :]
+    ]
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        *recent_history,
+        {"role": "user", "content": f"CV excerpts:\n\n{excerpts}\n\nQuestion: {question}"},
+    ]
+    return openai_service.chat(messages), sources
