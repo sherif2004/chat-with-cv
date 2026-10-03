@@ -25,7 +25,7 @@ EMBEDDING_DEPLOYMENT = os.environ["AZURE_OPENAI_EMBEDDING_DEPLOYMENT"]
 CHAT_DEPLOYMENT = os.environ["AZURE_OPENAI_CHAT_DEPLOYMENT"]
 
 # Tunables
-EMBEDDING_DIMENSIONS = 1536  # text-embedding-3-small / ada-002 (3072 for text-embedding-3-large)
+EMBEDDING_DIMENSIONS = 3072  # text-embedding-3-small (3072 for text-embedding-3-large)
 CHUNK_SIZE = 1500  # characters per chunk
 CHUNK_OVERLAP = CHUNK_SIZE // 5  # 20% overlap between neighbouring chunks
 MAX_WORKERS = 4  # CVs processed in parallel
