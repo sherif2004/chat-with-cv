@@ -248,6 +248,7 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 | `CACHE_SIZE` | `256` | Entries kept per kind of cached result (router, search, answer) |
 | `AGENT_MAX_ROUNDS` | `5` | Tool rounds the agent may take for one complex question |
 | `AGENT_MAX_SECONDS` | `30` | Time budget for those rounds, then it answers with what it found |
+| `AGENT_SEARCH_K` | `20` | Most excerpts one agent search hands to the model (one per CV by default, so a search reaches up to 20 CVs) |
 | `AGENT_CV_CHARS` | `12000` | Most characters of one CV the `get_cv` tool hands to the model |
 | `TOP_K` | `10` | Chunks sent to the chat model for each question |
 | `MIN_FILTERED_RESULTS` | `3` | Fewer section-filtered hits than this and the search runs again on all sections |

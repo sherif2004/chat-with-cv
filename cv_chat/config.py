@@ -60,3 +60,4 @@ EMBED_CACHE_SIZE = 256  # question embeddings kept in memory
 AGENT_MAX_ROUNDS = 5  # tool-using rounds the agent may take for one complex question
 AGENT_MAX_SECONDS = 30  # time budget for those rounds; afterwards it answers from what it has found
 AGENT_CV_CHARS = 12000  # most characters of one CV that get_cv hands to the model
+AGENT_SEARCH_K = 20  # most excerpts one search_cvs call hands to the model

@@ -33,6 +33,9 @@ TOOLS = [
             "query": {"type": "string", "description": "What to look for, worded like a CV would say it."},
             "cvs": {"type": "array", "items": {"type": "string"},
                     "description": "Only search these CV file names. Omit to search all CVs."},
+            "per_cv": {"type": "integer", "minimum": 1, "maximum": 5,
+                       "description": "Most excerpts per CV. Default 1 when searching all CVs, so one search reaches "
+                                      "many CVs; default 2 when cvs is given. Raise it to see more of each CV."},
         }, "required": ["query"]},
     }},
     {"type": "function", "function": {
@@ -64,17 +67,20 @@ class _Run:
                 self.on_step("Listing the CVs")
                 return "\n".join(ingest.list_cvs()) or "No CVs."
             if name == "search_cvs":
-                return self._search(str(args["query"]), args.get("cvs") or [])
+                return self._search(str(args["query"]), args.get("cvs") or [], args.get("per_cv"))
             if name == "get_cv":
                 return self._get_cv(str(args["file_name"]))
             return f"Error: unknown tool {name}"
         except Exception as error:  # a failing tool is reported to the model, which can try something else
             return f"Error: {str(error).splitlines()[0] if str(error) else type(error).__name__}"
 
-    def _search(self, query: str, cvs: list[str]) -> str:
+    def _search(self, query: str, cvs: list[str], per_cv: int | None) -> str:
         self.on_step(f"Searching: {query}" + (f" ({len(cvs)} CV{'' if len(cvs) == 1 else 's'})" if cvs else ""))
         file_ids = [ingest.file_id_for(name) for name in cvs] or None
-        return self._show(retrieval.spread_over_cvs(retrieval.search(query, [], file_ids)))
+        per_cv = min(max(int(per_cv or (2 if cvs else 1)), 1), 5)
+        results = retrieval.spread_over_cvs(retrieval.search(query, [], file_ids), per_cv, config.AGENT_SEARCH_K)
+        found = len({chunk["file_name"] for chunk in results})
+        return f"{found} CV{'' if found == 1 else 's'} matched.\n\n" + self._show(results)
 
     def _get_cv(self, file_name: str) -> str:
         self.on_step(f"Reading {file_name}")

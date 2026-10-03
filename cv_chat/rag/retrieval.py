@@ -52,15 +52,17 @@ def retrieve(queries: list[str], sections: list[str]) -> list[dict]:
     return spread_over_cvs(results)
 
 
-def spread_over_cvs(results: list[dict]) -> list[dict]:
+def spread_over_cvs(
+    results: list[dict], per_cv: int = config.MAX_CHUNKS_PER_CV, limit: int = config.TOP_K
+) -> list[dict]:
     """Keep the ranking but allow each CV only a few chunks, so broad questions reach many CVs."""
-    per_cv: Counter[str] = Counter()
+    taken: Counter[str] = Counter()
     picked = []
     for result in results:
-        if per_cv[result["file_name"]] < config.MAX_CHUNKS_PER_CV:
-            per_cv[result["file_name"]] += 1
+        if taken[result["file_name"]] < per_cv:
+            taken[result["file_name"]] += 1
             picked.append(result)
-        if len(picked) == config.TOP_K:
+        if len(picked) == limit:
             break
     return picked
 
