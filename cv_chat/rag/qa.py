@@ -99,8 +99,8 @@ def _route(question: str, history: list[dict], trace: Trace | None = None) -> Ro
     except Exception:  # routing only improves the search, so a failure must never block the answer
         return done(Route("simple", question, []), cached=False, failed=True)  # not cached: the next try may work
     cache.put(ROUTE, key, route, token)
-    if route.kind == "chat":
-        cache.put(ROUTE, alone_key, route, token)
+    if route.kind == "chat":  # stored without the rewritten query, which may contain details from this chat
+        cache.put(ROUTE, alone_key, Route("chat", question, []), token)
     return done(route, cached=False)
 
 
@@ -242,7 +242,9 @@ def _answer(question: str, history: list[dict], expand: bool, on_step: Callable[
             trace.add("cache", "chat reply cache hit", trace.now_ms())
             return Answer(iter([reply]), [], "chat")
         token = cache.token()
-        messages = [{"role": "system", "content": CHAT_PROMPT}, *_recent(history), {"role": "user", "content": question}]
+        # No chat history in the prompt: the reply is cached by the message text alone and shared by every session,
+        # so it must not depend on, or carry anything from, one particular conversation.
+        messages = [{"role": "system", "content": CHAT_PROMPT}, {"role": "user", "content": question}]
         return Answer(_remember_chat(openai_service.chat_stream(messages), question, token), [], "chat")
     if route.kind == "complex":  # needs more than the best chunks: let the agent plan its own searches
         on_step("Complex question: planning the searches")
