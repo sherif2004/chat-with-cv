@@ -3,7 +3,7 @@ import threading
 from collections.abc import Callable, Iterator
 from functools import lru_cache
 
-from openai import AzureOpenAI, NotFoundError
+from openai import AzureOpenAI, BadRequestError, NotFoundError
 
 from cv_chat import config
 
@@ -16,10 +16,18 @@ _client = AzureOpenAI(
 _embed_gate = threading.Semaphore(config.EMBED_CONCURRENCY)  # shared by every parallel CV
 
 
+class ContentFilterError(RuntimeError):
+    """Azure's content safety filter (for example its jailbreak detection) refused the prompt."""
+
+
 def _explain_404(deployment: str, call: Callable):
     """Azure answers 404 for a wrong deployment name and for a wrong endpoint; say which things to check."""
     try:
         return call()
+    except BadRequestError as error:
+        if getattr(error, "code", None) == "content_filter":
+            raise ContentFilterError("Azure's content safety filter refused the prompt.") from error
+        raise
     except NotFoundError as error:
         raise RuntimeError(
             f"Azure OpenAI has no deployment named '{deployment}' at {config.OPENAI_ENDPOINT}. "

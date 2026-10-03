@@ -100,6 +100,53 @@ def _expand(query: str) -> list[str]:
     return [q for q in dict.fromkeys(alternatives) if q != query][: config.EXPANDED_QUERIES]
 
 
+def _passes(messages: list[dict]) -> bool:
+    """True if Azure accepts the prompt. Only the start of the answer is read."""
+    stream = openai_service.chat_stream(messages)
+    try:
+        next(stream, None)
+        return True
+    except openai_service.ContentFilterError:
+        return False
+    finally:
+        stream.close()
+
+
+def _unflagged(sources: list[dict], messages_for: Callable[[list[dict]], list[dict]]) -> list[dict]:
+    """The excerpts Azure accepts, found by halving the list: a CV that carries an injection must not break every answer."""
+    if not sources or _passes(messages_for(sources)):
+        return sources
+    if len(sources) == 1:
+        return []
+    middle = len(sources) // 2
+    return _unflagged(sources[:middle], messages_for) + _unflagged(sources[middle:], messages_for)
+
+
+def _guarded(sources: list[dict], messages_for: Callable[[list[dict]], list[dict]]) -> Iterator[str]:
+    """Stream the answer. If Azure's content filter refuses the excerpts, answer without the flagged ones and say so.
+
+    `sources` is trimmed in place to the excerpts actually used, so the Sources list stays honest.
+    """
+    stream = openai_service.chat_stream(messages_for(sources))
+    try:
+        first = next(stream, None)
+    except openai_service.ContentFilterError:
+        kept = _unflagged(sources, messages_for)
+        names = sorted({s["file_name"] for s in sources if s not in kept})
+        log.warning("content filter refused excerpts from %s", names)
+        sources[:] = kept
+        if not kept:
+            yield "Azure's content safety filter refused every excerpt found for this question, so I cannot answer it."
+            return
+        yield from openai_service.chat_stream(messages_for(kept))
+        if names:
+            yield f"\n\n> Note: excerpts from {', '.join(names)} were left out because Azure's content safety filter flagged them."
+        return
+    if first is not None:
+        yield first
+        yield from stream
+
+
 def _remember(stream: Iterator[str], sources: list[dict], route: str, key: tuple, token: int) -> Iterator[str]:
     """Pass the answer through and store it once it has been written completely."""
     pieces = []
@@ -150,10 +197,14 @@ def _answer(question: str, history: list[dict], expand: bool, on_step: Callable[
     queries = [route.query, *(_expand(route.query) if expand else [])]
     on_step(f"Searching the CVs with {len(queries)} quer{'y' if len(queries) == 1 else 'ies'}")
     sources = retrieval.retrieve(queries, route.sections)
-    excerpts = "\n\n".join(retrieval.format_excerpt(s) for s in sources)
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        *_recent(history),
-        {"role": "user", "content": f"CV excerpts:\n\n{excerpts}\n\nQuestion: {question}"},
-    ]
-    return Answer(openai_service.chat_stream(messages), sources, "simple")
+    recent = _recent(history)
+
+    def messages_for(chosen: list[dict]) -> list[dict]:
+        excerpts = "\n\n".join(retrieval.format_excerpt(s) for s in chosen)
+        return [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            *recent,
+            {"role": "user", "content": f"CV excerpts:\n\n{excerpts}\n\nQuestion: {question}"},
+        ]
+
+    return Answer(_guarded(sources, messages_for), sources, "simple")
