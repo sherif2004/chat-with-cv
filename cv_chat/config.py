@@ -29,6 +29,7 @@ EMBEDDING_DIMENSIONS = 3072  # text-embedding-3-small (3072 for text-embedding-3
 CHUNK_SIZE = 1500  # max characters per chunk; a section shorter than this stays one chunk
 CHUNK_OVERLAP = CHUNK_SIZE // 5  # 20% overlap, used only when a long section is split
 DOCLING_DEVICE = "cpu"  # "cuda" if a GPU is available
+MIN_CVS = 8  # CVs needed in the knowledge base before processing and chatting are enabled
 MAX_WORKERS = 4  # CVs processed in parallel
 TOP_K = 10  # chunks sent to the chat model per question
 RETRIEVE_K = 30  # candidates fetched and reranked before the per-CV cap is applied

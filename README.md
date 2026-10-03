@@ -33,7 +33,7 @@ Every answer comes from the uploaded CVs and shows which CVs it was based on.
 
 | Step | What you do | What the app does |
 |---|---|---|
-| 1. Upload | Drop PDF or DOCX CVs in the sidebar (at least 8) | Reads and stores them |
+| 1. Upload | Drop PDF or DOCX CVs in the sidebar (at least 8 in total) | Reads and stores them |
 | 2. Process | Click **Process CVs** | Reads each CV's layout, splits it by section and makes it searchable, several CVs at the same time. CVs that are already indexed and unchanged are skipped |
 | 3. Ask | Type a question in the chat | Finds the relevant parts of the CVs and streams an answer from them |
 | 4. Check | Open **Sources** under an answer | Shows which CVs, and which excerpts, the answer used |
@@ -171,11 +171,14 @@ The browser opens automatically. The Blob container and the search index are cre
 
 ## Using the app
 
-1. **Upload.** In the sidebar, drop at least 8 CVs (PDF or DOCX) into the upload box.
+1. **Upload.** In the sidebar, drop CVs (PDF or DOCX) into the upload box. **Process CVs** stays disabled until the knowledge base would hold at least 8 CVs (the ones already indexed plus the new files), and the chat stays disabled while there are fewer than 8.
 2. **Process.** Click **Process CVs**. Each file gets a green check and its chunk count as soon as it finishes, a grey check if it was already indexed and unchanged, or a red mark and the reason if it failed. A progress bar tracks the whole batch.
 3. **Ask.** Type a question, or click one of the suggested questions on the welcome screen. The answer streams in as it is written.
 4. **Check the sources.** Open **Sources** under an answer to see which CVs it used and the most relevant passage of each.
-5. **Start over.** **New chat** clears the conversation. It does not delete any CVs.
+5. **Manage a CV.** Open **Manage a CV** in the sidebar, pick a CV, then:
+   - **Re-index** processes the stored file again (for example after the pipeline changed),
+   - **Delete** removes it from Blob Storage and from search, after a confirmation. If this leaves fewer than 8 CVs, the chat is disabled until you add more.
+6. **Start over.** **New chat** clears the conversation. It does not delete any CVs.
 
 Your CVs stay in Azure, so they are still there after you close the app. The sidebar lists them again the next time you open it.
 
@@ -202,7 +205,7 @@ chat-with-cv/
     │   ├── chunking.py           # pages to section-based chunks
     │   └── sections.py           # heading to standard section type
     ├── rag/                  # the two pipelines
-    │   ├── ingest.py             # upload flow: skip check, extract, chunk, embed, save
+    │   ├── ingest.py             # upload flow: skip check, extract, chunk, embed, save; delete and re-index
     │   └── qa.py                 # question flow: rewrite, search, spread over CVs, stream answer
     └── ui/                   # Streamlit screens
         ├── sidebar.py            # upload, process, list of CVs
@@ -238,6 +241,7 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 | `CHUNK_SIZE` | `1500` | Longest chunk in characters. A section shorter than this stays one chunk |
 | `CHUNK_OVERLAP` | `300` | Characters shared between pieces of a long section (20%) |
 | `DOCLING_DEVICE` | `"cpu"` | Where Docling runs. Use `"cuda"` with a GPU for much faster extraction |
+| `MIN_CVS` | `8` | CVs needed in the knowledge base before processing and chatting are enabled |
 | `MAX_WORKERS` | `4` | CVs processed at the same time. Lower it if Azure OpenAI reports rate limits |
 | `EMBED_BATCH` | `16` | Chunks per embedding request |
 | `EMBED_CONCURRENCY` | `2` | Embedding requests in flight at once, across all CVs |
@@ -259,6 +263,7 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 - **After changing extraction or chunking**, raise `PIPELINE_VERSION` in `config.py` and click **Process CVs** again. Otherwise unchanged files are skipped and keep their old chunks.
 - **Using an index from an older version of the app:** delete it in the Azure portal (or set a new `AZURE_SEARCH_INDEX` name) and process the CVs again. The new fields (`file_id`, `section_type`, `section`, `page`, `content_hash`) can be added in place, but old chunks do not have them and are never cleaned up.
 - **The first CV is slow.** Docling loads its layout models on first use. After that, extraction takes a few seconds per CV on CPU. A GPU (`DOCLING_DEVICE = "cuda"`) is much faster.
+- **Delete is permanent.** It removes the original file from Blob Storage and the CV from the index.
 - **Scanned PDFs are not supported.** A PDF that is only a picture has no text layer, so it is reported as "No text found". OCR is not set up.
 - **DOCX files have no page numbers**, so their chunks are stored as page 1.
 - **Each question makes an extra model call** (the rewrite), which adds a little time before the answer starts streaming.
@@ -279,8 +284,8 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 | A CV was changed but still shows old content | It was skipped as unchanged. Raise `PIPELINE_VERSION` if you changed the pipeline, otherwise check that the file content really changed |
 | Upload fails with an error about vector dimensions | `EMBEDDING_DIMENSIONS` does not match the index. See [Check the embedding size](#4-check-the-embedding-size) and the note in [Good to know](#good-to-know) |
 | `Could not list the CVs` in the sidebar | The storage connection string is wrong or the storage account is not reachable |
-| **Process CVs** is greyed out | No files are selected in the upload box |
-| The chat input is disabled | No CVs are in Azure yet. Process some first |
+| **Process CVs** is greyed out | No files are selected, or the indexed plus new CVs are still fewer than 8 |
+| The chat input is disabled | Fewer than 8 CVs are in Azure. Process more first |
 
 ---
 

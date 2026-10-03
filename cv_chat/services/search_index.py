@@ -84,6 +84,10 @@ def delete_stale_chunks(file_id: str, keep_ids: set[str]) -> None:
         _search_client.delete_documents(stale[start : start + 500])
 
 
+def delete_file_chunks(file_id: str) -> None:
+    delete_stale_chunks(file_id, set())
+
+
 def hybrid_search(text: str, vector: list[float], k: int, section_types: list[str] | None = None) -> list[dict]:
     """Keyword and vector search in one query, merged, then re-ranked by the semantic ranker.
 

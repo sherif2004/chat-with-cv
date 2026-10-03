@@ -3,6 +3,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from cv_chat import config
 from cv_chat.rag import qa
 
 AVATARS = {"user": ":material/person:", "assistant": ":material/auto_awesome:"}
@@ -37,7 +38,7 @@ def _welcome(has_cvs: bool) -> None:
         "</div>"
     )
     if not has_cvs:
-        st.info("Upload and process CVs from the sidebar to start chatting.", icon=":material/info:")
+        st.info(f"Process at least {config.MIN_CVS} CVs from the sidebar to start chatting.", icon=":material/info:")
         return
     columns = st.columns(2)
     for i, suggestion in enumerate(SUGGESTIONS):

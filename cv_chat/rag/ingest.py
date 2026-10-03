@@ -13,12 +13,16 @@ from cv_chat.processing.sections import section_type
 from cv_chat.services import blob_storage, openai_service, search_index
 
 
-def process_cv(file_name: str, data: bytes) -> tuple[int, bool]:
+def file_id_for(file_name: str) -> str:
+    """Stable id per file: processing the same file again overwrites its chunks instead of duplicating them."""
+    return hashlib.md5(file_name.encode()).hexdigest()
+
+
+def process_cv(file_name: str, data: bytes, force: bool = False) -> tuple[int, bool]:
     """Index one CV and store the original file. Returns (chunks, skipped); skipped means it was already indexed."""
-    # Stable ids per file: processing the same file again overwrites its chunks instead of duplicating them.
-    file_id = hashlib.md5(file_name.encode()).hexdigest()
+    file_id = file_id_for(file_name)
     content_hash = hashlib.md5(data + str(config.PIPELINE_VERSION).encode()).hexdigest()
-    if search_index.get_hash(file_id) == content_hash:
+    if not force and search_index.get_hash(file_id) == content_hash:
         return 0, True
 
     document = extract_cv(file_name, data)
@@ -41,6 +45,18 @@ def process_cv(file_name: str, data: bytes) -> tuple[int, bool]:
     search_index.delete_stale_chunks(file_id, {doc["id"] for doc in docs})
     blob_storage.upload_file(file_name, data)
     return len(chunks), False
+
+
+def delete_cv(file_name: str) -> None:
+    """Remove a CV everywhere. The index goes first: a CV left in the index but not in storage would still be quoted."""
+    search_index.delete_file_chunks(file_id_for(file_name))
+    blob_storage.delete_file(file_name)
+
+
+def reindex_cv(file_name: str) -> int:
+    """Process a stored CV again from its original file (for example after the pipeline changed). Returns the chunks."""
+    chunks, _ = process_cv(file_name, blob_storage.download_file(file_name), force=True)
+    return chunks
 
 
 def process_cvs(files: list[tuple[str, bytes]]) -> Iterator[dict]:
