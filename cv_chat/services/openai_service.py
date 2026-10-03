@@ -1,4 +1,4 @@
-"""Azure OpenAI: embeddings for CV chunks and questions."""
+"""Azure OpenAI: embeddings for CV chunks and questions, and chat answers."""
 from openai import AzureOpenAI
 
 from cv_chat import config
@@ -14,3 +14,8 @@ _client = AzureOpenAI(
 def embed(texts: list[str]) -> list[list[float]]:
     response = _client.embeddings.create(model=config.EMBEDDING_DEPLOYMENT, input=texts)
     return [item.embedding for item in response.data]
+
+
+def chat(messages: list[dict]) -> str:
+    response = _client.chat.completions.create(model=config.CHAT_DEPLOYMENT, messages=messages)
+    return response.choices[0].message.content or ""
