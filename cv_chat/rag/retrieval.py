@@ -1,5 +1,6 @@
 """Finding CV chunks for a question: embed, hybrid search, merge several searches, spread over CVs."""
 import re
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -7,6 +8,7 @@ from functools import lru_cache
 from cv_chat import config
 from cv_chat.rag import metadata
 from cv_chat.rag.cache import SEARCH, cache
+from cv_chat.rag.trace import Trace
 from cv_chat.services import openai_service, search_index
 
 
@@ -16,18 +18,32 @@ def embed_question(question: str) -> tuple[float, ...]:
     return tuple(openai_service.embed([question])[0])
 
 
-def search(query: str, sections: list[str], file_ids: list[str] | None = None, where: str | None = None) -> list[dict]:
+def search(
+    query: str, sections: list[str], file_ids: list[str] | None = None, where: str | None = None, trace: Trace | None = None
+) -> list[dict]:
     """One hybrid search with semantic re-ranking, limited to the sections when there are enough hits. Cached."""
+    start = time.perf_counter()
+    info = {"sections": sections, "cvs": len(file_ids or []), "filter": where or "", "cached": False, "fallback": False, "embed_ms": 0}
+
+    def record(results: list[dict]) -> list[dict]:
+        if trace:
+            trace.add("search", query, (time.perf_counter() - start) * 1000, results=len(results), **info)
+        return results
+
     key = (query, tuple(sections), tuple(file_ids or ()), where)
     if (cached := cache.get(SEARCH, key)) is not None:
-        return cached
+        info["cached"] = True
+        return record(cached)
     token = cache.token()
+    embed_start = time.perf_counter()
     vector = list(embed_question(query))
+    info["embed_ms"] = round((time.perf_counter() - embed_start) * 1000, 1)
     results = search_index.hybrid_search(query, vector, config.RETRIEVE_K, sections, file_ids, where)
     if sections and len(results) < config.MIN_FILTERED_RESULTS:  # the CVs may use unusual headings: search everything
+        info["fallback"] = True
         results = search_index.hybrid_search(query, vector, config.RETRIEVE_K, file_ids=file_ids, where=where)
     cache.put(SEARCH, key, results, token)
-    return results
+    return record(results)
 
 
 def fuse(result_lists: list[list[dict]]) -> list[dict]:
@@ -43,13 +59,13 @@ def fuse(result_lists: list[list[dict]]) -> list[dict]:
     return [chunks[key] for key, _ in scores.most_common()]
 
 
-def retrieve(queries: list[str], sections: list[str]) -> list[dict]:
+def retrieve(queries: list[str], sections: list[str], trace: Trace | None = None) -> list[dict]:
     """Search every query (the first is the main one), merge the lists and keep the best chunks."""
     if len(queries) == 1:
-        results = search(queries[0], sections)
+        results = search(queries[0], sections, trace=trace)
     else:
         with ThreadPoolExecutor(max_workers=len(queries)) as pool:
-            results = fuse(list(pool.map(lambda query: search(query, sections), queries)))
+            results = fuse(list(pool.map(lambda query: search(query, sections, trace=trace), queries)))
     return spread_over_cvs(results)
 
 

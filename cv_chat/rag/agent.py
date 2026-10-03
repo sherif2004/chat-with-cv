@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterator
 
 from cv_chat import config
 from cv_chat.rag import ingest, metadata, retrieval
+from cv_chat.rag.trace import Trace
 from cv_chat.services import openai_service, search_index
 
 SYSTEM_PROMPT = """You answer questions about a set of candidate CVs by calling tools. The question may need many CVs
@@ -56,8 +57,9 @@ TOOLS = [
 class _Run:
     """One agent run: executes the tools and remembers every excerpt it showed the model, for the Sources list."""
 
-    def __init__(self, on_step: Callable[[str], None]):
+    def __init__(self, on_step: Callable[[str], None], trace: Trace | None = None):
         self.on_step = on_step
+        self.trace = trace or Trace()
         self.sources: dict[tuple, dict] = {}
 
     def _show(self, chunks: list[dict]) -> str:
@@ -70,14 +72,16 @@ class _Run:
             args = json.loads(arguments or "{}")
             if name == "list_cvs":
                 self.on_step("Listing the CVs")
-                return self._list_cvs()
-            if name == "search_cvs":
+                with self.trace.timed("tool", "list_cvs"):
+                    return self._list_cvs()
+            if name == "search_cvs":  # its search is recorded as a "search" event by the retrieval code
                 return self._search(
                     str(args["query"]), args.get("cvs") or [], args.get("per_cv"),
                     args.get("min_years"), args.get("max_years"), args.get("job_title"),
                 )
             if name == "get_cv":
-                return self._get_cv(str(args["file_name"]))
+                with self.trace.timed("tool", "get_cv", cv=str(args["file_name"])):
+                    return self._get_cv(str(args["file_name"]))
             return f"Error: unknown tool {name}"
         except Exception as error:  # a failing tool is reported to the model, which can try something else
             return f"Error: {str(error).splitlines()[0] if str(error) else type(error).__name__}"
@@ -105,7 +109,7 @@ class _Run:
             None if min_years is None else float(min_years), None if max_years is None else float(max_years), job_title
         )
         per_cv = min(max(int(per_cv or (2 if cvs else 1)), 1), 5)
-        results = retrieval.spread_over_cvs(retrieval.search(query, [], file_ids, where), per_cv, config.AGENT_SEARCH_K)
+        results = retrieval.spread_over_cvs(retrieval.search(query, [], file_ids, where, self.trace), per_cv, config.AGENT_SEARCH_K)
         found = len({chunk["file_name"] for chunk in results})
         note = " (metadata filter applied)" if where else ""
         return f"{found} CV{'' if found == 1 else 's'} matched{note}.\n\n" + self._show(results)
@@ -125,17 +129,21 @@ class _Run:
         return text + ("\n[CV cut off]" if len(shown) < len(chunks) else "")
 
 
-def run(question: str, recent: list[dict], on_step: Callable[[str], None]) -> tuple[Iterator[str], list[dict]]:
+def run(
+    question: str, recent: list[dict], on_step: Callable[[str], None], trace: Trace | None = None
+) -> tuple[Iterator[str], list[dict]]:
     """Let the model plan and run searches for at most AGENT_MAX_ROUNDS rounds and AGENT_MAX_SECONDS seconds,
     then return (answer as a stream, sources). Out of budget, it answers from what it has found so far."""
-    state = _Run(on_step)
+    state = _Run(on_step, trace)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, *recent, {"role": "user", "content": question}]
     deadline = time.monotonic() + config.AGENT_MAX_SECONDS
-    for _ in range(config.AGENT_MAX_ROUNDS):
+    for round_number in range(1, config.AGENT_MAX_ROUNDS + 1):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        kind, result = openai_service.chat_with_tools(messages, TOOLS, timeout=remaining)
+        with state.trace.timed("agent_model", f"round {round_number}") as info:
+            kind, result = openai_service.chat_with_tools(messages, TOOLS, timeout=remaining)
+            info["decision"] = "answer" if kind == "answer" else ", ".join(call["name"] for call in result) or "nothing"
         if kind == "answer":  # streamed on as it is written; the sources are complete by now
             return result, list(state.sources.values())
         if not result:  # the model produced nothing: fall through to the forced answer

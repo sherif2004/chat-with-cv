@@ -5,6 +5,7 @@ import streamlit as st
 
 from cv_chat import config
 from cv_chat.rag import qa
+from cv_chat.ui import details
 
 ROUTE_NOTES = {
     "chat": "Answered without searching the CVs",
@@ -63,7 +64,10 @@ def _suggest(question: str) -> None:
 def _show(message: dict) -> None:
     with st.chat_message(message["role"], avatar=AVATARS[message["role"]]):
         st.markdown(message["content"])
-        _route_note(message.get("route"))
+        if message.get("trace"):
+            details.render(message["trace"], message.get("sources", []))
+        else:
+            _route_note(message.get("route"))
         _sources(message.get("sources", []))
 
 
@@ -73,7 +77,7 @@ def _answer(question: str) -> None:
     with st.chat_message("assistant", avatar=AVATARS["assistant"]):
         try:
             with st.status("Reading your question...", expanded=True) as status:
-                stream, sources, route = qa.ask(
+                stream, sources, route, trace = qa.ask(
                     question, history, expand=st.session_state.get("expand_queries", False),
                     cache_answers=st.session_state.get("cache_answers", False), on_step=st.write
                 )
@@ -82,11 +86,12 @@ def _answer(question: str) -> None:
         except Exception as error:
             st.error(f"Could not answer: {str(error).splitlines()[0]}", icon=":material/error:")
             return
-        _route_note(route)
+        record = trace.to_dict()  # complete now that the answer has been written
+        details.render(record, sources)
         _sources(sources)
     st.session_state.messages += [
         {"role": "user", "content": question},
-        {"role": "assistant", "content": answer, "sources": sources, "route": route},
+        {"role": "assistant", "content": answer, "sources": sources, "route": route, "trace": record},
     ]
 
 

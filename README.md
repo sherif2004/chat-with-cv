@@ -37,7 +37,7 @@ Every answer comes from the uploaded CVs and shows which CVs it was based on.
 | 1. Upload | Drop PDF or DOCX CVs in the sidebar (at least 8 in total) | Reads and stores them |
 | 2. Process | Click **Process CVs** | Reads each CV's layout, splits it by section and makes it searchable, several CVs at the same time. CVs that are already indexed and unchanged are skipped |
 | 3. Ask | Type a question in the chat | Finds the relevant parts of the CVs and streams an answer from them |
-| 4. Check | Open **Sources** under an answer | Shows which CVs, and which excerpts, the answer used |
+| 4. Check | Open **Sources** or **Details** under an answer | Sources: which CVs, and which excerpts, the answer used. Details: how the question was routed, what was searched, and where the time went |
 
 The three required Azure services each have one job:
 
@@ -169,6 +169,7 @@ The browser opens automatically. The Blob container and the search index are cre
 2. **Process.** Click **Process CVs**. The files are processed in the background, 4 at a time, and a live status list in the sidebar refreshes every 2 seconds. Each file shows *waiting*, then the stage it is in (*reading layout*, *reading name, title and experience*, *embedding*, *saving*), then a green check with its chunk count, a grey check if it was already indexed and unchanged, or a red mark and the reason if it failed. A progress bar and a line such as "4 running in parallel · 3 waiting" show the whole batch. You can keep using the app while it runs; when the last file finishes the CV list updates by itself. **Clear status** removes the finished entries.
 3. **Ask.** Type a question, or click one of the suggested questions on the welcome screen. The answer streams in as it is written.
 4. **Check the sources.** Open **Sources** under an answer to see which CVs it used and the most relevant passage of each.
+5. **Check the details.** Open **Details** (the line shows the route and the total time) for tabs with: a *Timeline* of every step with its time and share of the total (router, query expansion, each search, agent rounds and tools, the model's wait for its first word, writing the answer); the *Router* result (class, standalone question, sections searched); every *Search* (query, chunks found, filters, cached or not); the *Agent* rounds and tool calls; the exact *Excerpts used*; and the *Settings* (model deployments, query expansion, answer cache). Details are kept with each message for the whole chat.
 5. **Manage a CV.** Open **Manage a CV** in the sidebar, pick a CV, then:
    - **Re-index** queues the stored file for processing again (for example after the pipeline changed) and shows it in the same status list,
    - **Delete** removes it from Blob Storage and from search, after a confirmation. If this leaves fewer than 8 CVs, the chat is disabled until you add more.
@@ -208,6 +209,7 @@ chat-with-cv/
     └── ui/                   # Streamlit screens
         ├── sidebar.py            # upload, process, list of CVs
         ├── chat.py               # conversation and sources
+        ├── details.py            # the Details dropdown: route, timeline, searches, agent, excerpts
         └── styles.css            # styling of the welcome screen
 ```
 
