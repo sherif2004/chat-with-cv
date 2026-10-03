@@ -197,6 +197,7 @@ chat-with-cv/
     │   ├── chunking.py           # pages to section-based chunks
     │   └── sections.py           # heading to standard section type
     ├── rag/                  # the two pipelines
+    │   ├── cache.py              # in-memory cache of router results, searches and answers
     │   ├── agent.py              # tool-using agent for complex questions (capped rounds and time)
     │   ├── ingest.py             # upload flow: skip check, extract, chunk, embed, save; delete
     │   ├── jobs.py               # background queue: runs CVs in parallel and tracks each file's state
@@ -244,6 +245,7 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 | `MAX_CHUNKS_PER_CV` | `2` | Most chunks one CV can contribute to an answer |
 | `EXPANDED_QUERIES` | `2` | Alternative queries searched when **Query expansion** is on |
 | `RRF_K` | `60` | Reciprocal rank fusion constant used to merge the searches |
+| `CACHE_SIZE` | `256` | Entries kept per kind of cached result (router, search, answer) |
 | `AGENT_MAX_ROUNDS` | `5` | Tool rounds the agent may take for one complex question |
 | `AGENT_MAX_SECONDS` | `30` | Time budget for those rounds, then it answers with what it found |
 | `AGENT_CV_CHARS` | `12000` | Most characters of one CV the `get_cv` tool hands to the model |
@@ -273,7 +275,7 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 
 ## Roadmap
 
-Improvements to the chat side, in the order they are built. Steps marked *done* are already described in the sections above.
+Improvements to the chat side, in the order they were built. All four steps are done; this section keeps the reasoning and costs behind each one.
 
 ### 1. Router and inline citations (done)
 
@@ -296,7 +298,7 @@ Improvements to the chat side, in the order they are built. Steps marked *done* 
 - *Why:* ranking or counting needs more than the 10 best chunks. This is the biggest weakness of the current flow, for example "who has the most experience?".
 - *Cost:* several model calls, often 10 to 30 seconds per complex question. Simple questions are not affected.
 
-### 4. Caching repeated questions
+### 4. Caching repeated questions (done)
 
 - **Rewrite / router result** is cached per question and recent chat, so asking again skips that model call.
 - **Search results** are cached per query and section filter, so repeats skip the searches and do not use the semantic ranker quota again.

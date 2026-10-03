@@ -3,6 +3,7 @@ import streamlit as st
 
 from cv_chat import config
 from cv_chat.rag import ingest, jobs
+from cv_chat.rag.cache import cache
 
 
 def render() -> list[str]:
@@ -34,9 +35,22 @@ def render() -> list[str]:
             help="Also search two reworded versions of each question and merge the results. "
             "Finds more, but answers start 1 to 2 seconds later and each question uses three semantic searches.",
         )
+        st.toggle(
+            "Cache final answers", key="cache_answers",
+            help="Reuse the answer to an identical question in an identical chat. Off by default: a cached answer can be out of date.",
+        )
+        st.button(
+            "Clear cache", icon=":material/mop:", width="stretch", on_click=_clear_cache,
+            help="Forget cached router results, searches and answers. This also happens whenever a CV is processed or deleted.",
+        )
         if st.button("New chat", icon=":material/add_comment:", width="stretch"):
             st.session_state.messages = []
     return cvs
+
+
+def _clear_cache() -> None:
+    cache.clear()
+    st.session_state.notice = ("Cache cleared", ":material/task_alt:")
 
 
 def _start(files: list[tuple[str, bytes]]) -> None:

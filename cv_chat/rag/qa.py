@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from cv_chat import config
 from cv_chat.processing.sections import SECTION_TYPES
 from cv_chat.rag import agent, retrieval
+from cv_chat.rag.cache import ANSWER, ROUTE, cache
 from cv_chat.services import openai_service
 
 log = logging.getLogger(__name__)
@@ -53,6 +54,10 @@ class Route:
 def _route(question: str, history: list[dict]) -> Route:
     """Classify the message and make it stand alone in one model call. Falls back to a plain search of the raw question."""
     recent = _recent(history)
+    key = (question, tuple((m["role"], m["content"]) for m in recent))
+    if (cached := cache.get(ROUTE, key)) is not None:
+        return cached
+    token = cache.token()
     try:
         reply = openai_service.chat(
             [{"role": "system", "content": ROUTER_PROMPT}, *recent, {"role": "user", "content": question}],
@@ -62,9 +67,11 @@ def _route(question: str, history: list[dict]) -> Route:
         kind = data.get("route") if data.get("route") in ROUTES else "simple"
         query = str(data.get("query") or "").strip() or question
         sections = [name for name in data.get("sections", []) if name in SECTION_TYPES]
-        return Route(kind, query, sections)
+        route = Route(kind, query, sections)
     except Exception:  # routing only improves the search, so a failure must never block the answer
-        return Route("simple", question, [])
+        return Route("simple", question, [])  # not cached: the next try may work
+    cache.put(ROUTE, key, route, token)
+    return route
 
 
 def _recent(history: list[dict]) -> list[dict]:
@@ -84,11 +91,39 @@ def _expand(query: str) -> list[str]:
     return [q for q in dict.fromkeys(alternatives) if q != query][: config.EXPANDED_QUERIES]
 
 
+def _remember(stream: Iterator[str], sources: list[dict], key: tuple, token: int) -> Iterator[str]:
+    """Pass the answer through and store it once it has been written completely."""
+    pieces = []
+    for piece in stream:
+        pieces.append(piece)
+        yield piece
+    cache.put(ANSWER, key, ("".join(pieces), sources), token)
+
+
 def ask(
-    question: str, history: list[dict], expand: bool = False, on_step: Callable[[str], None] = lambda step: None
+    question: str,
+    history: list[dict],
+    expand: bool = False,
+    cache_answers: bool = False,
+    on_step: Callable[[str], None] = lambda step: None,
 ) -> tuple[Iterator[str], list[dict]]:
-    """Find the relevant CV chunks and start the answer. expand=True also searches reworded queries; on_step is told what the agent is doing on complex questions. Returns (answer text as a stream, sources)."""
+    """Find the relevant CV chunks and start the answer. Returns (answer text as a stream, sources).
+
+    expand=True also searches reworded queries. cache_answers=True reuses the answer to an identical question with an
+    identical chat. on_step is told what the agent is doing on complex questions.
+    """
     question = question.strip()
+    if not cache_answers:
+        return _answer(question, history, expand, on_step)
+    key = (question, tuple((m["role"], m["content"]) for m in _recent(history)), expand)
+    if (cached := cache.get(ANSWER, key)) is not None:
+        return iter([cached[0]]), cached[1]
+    token = cache.token()
+    stream, sources = _answer(question, history, expand, on_step)
+    return _remember(stream, sources, key, token), sources
+
+
+def _answer(question: str, history: list[dict], expand: bool, on_step: Callable[[str], None]) -> tuple[Iterator[str], list[dict]]:
     route = _route(question, history)
     if route.kind == "chat":  # no search, no sources
         messages = [{"role": "system", "content": CHAT_PROMPT}, *_recent(history), {"role": "user", "content": question}]

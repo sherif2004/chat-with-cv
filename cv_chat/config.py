@@ -55,6 +55,7 @@ HISTORY_MESSAGES = 6  # recent chat messages sent along with each question
 EMBED_BATCH = 16  # chunks per embedding request
 EMBED_CONCURRENCY = 2  # embedding requests in flight at once, across all parallel CVs
 EXTRACT_CACHE_DIR = ".cache/extracted"  # Docling output per file, so re-chunking skips the slow step
+CACHE_SIZE = 256  # entries kept per kind of cached result (router, search, answer)
 EMBED_CACHE_SIZE = 256  # question embeddings kept in memory
 AGENT_MAX_ROUNDS = 5  # tool-using rounds the agent may take for one complex question
 AGENT_MAX_SECONDS = 30  # time budget for those rounds; afterwards it answers from what it has found

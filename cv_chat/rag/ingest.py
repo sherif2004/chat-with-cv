@@ -13,6 +13,7 @@ from cv_chat.processing import chunking, extract, sections
 from cv_chat.processing.chunking import chunk_cv
 from cv_chat.processing.extract import extract_cv
 from cv_chat.processing.sections import section_type
+from cv_chat.rag.cache import cache
 from cv_chat.services import blob_storage, openai_service, search_index
 
 
@@ -64,13 +65,17 @@ def process_cv(
     search_index.upload_chunks(docs)  # upload first, then drop leftovers, so the CV is never missing from the index
     search_index.delete_stale_chunks(file_id, {doc["id"] for doc in docs})
     blob_storage.upload_file(file_name, data)
+    cache.clear()  # cached searches and answers may not know this CV's new content
     return len(chunks), False
 
 
 def delete_cv(file_name: str) -> None:
     """Remove a CV everywhere. The index goes first: a CV left in the index but not in storage would still be quoted."""
-    search_index.delete_file_chunks(file_id_for(file_name))
-    blob_storage.delete_file(file_name)
+    try:
+        search_index.delete_file_chunks(file_id_for(file_name))
+        blob_storage.delete_file(file_name)
+    finally:  # even a half-finished delete changes what a search returns
+        cache.clear()
 
 
 def prepare() -> None:
