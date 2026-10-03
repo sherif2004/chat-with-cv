@@ -71,19 +71,24 @@ def spread_over_cvs(
 _TAG = re.compile(r"</?\s*cv_excerpt[^>]*>", re.IGNORECASE)
 
 
+def as_data(text: str) -> str:
+    """Wrap text that came from a CV (or a CV's name) in <cv_excerpt> tags, after removing any tags inside it, so the
+    model treats it as data. Removing a tag can join the pieces around it into a new one, so repeat until stable."""
+    while (stripped := _TAG.sub("", text)) != text:
+        text = stripped
+    return f"<cv_excerpt>\n{text}\n</cv_excerpt>"
+
+
 def format_excerpt(chunk: dict, with_profile: bool = False) -> str:
     """A chunk as the model sees it: a header naming its CV, section and page, then the text, inside <cv_excerpt> tags.
 
     with_profile adds one line about the candidate (name, title, years, contact). The tags mark the text as data (see
-    the system prompts). Tags inside the CV text are removed, so a CV cannot close the block early and pass its own
-    text off as instructions.
+    the system prompts), and tags inside the CV text are removed, so a CV cannot close the block early and pass its
+    own text off as instructions.
     """
     where = f"{chunk['section']} · p.{chunk['page']}" if chunk.get("page") else chunk["section"]
     profile = metadata.profile_line(chunk) if with_profile else ""
-    text = f"[CV: {chunk['file_name']} · {where}]\n" + (f"Candidate: {profile}\n" if profile else "") + chunk["content"]
-    while (stripped := _TAG.sub("", text)) != text:  # repeat: removing a tag can join the pieces around it into a new one
-        text = stripped
-    return f"<cv_excerpt>\n{text}\n</cv_excerpt>"
+    return as_data(f"[CV: {chunk['file_name']} · {where}]\n" + (f"Candidate: {profile}\n" if profile else "") + chunk["content"])
 
 
 def format_excerpts(chunks: list[dict]) -> str:

@@ -9,7 +9,8 @@ from cv_chat.services import openai_service, search_index
 
 SYSTEM_PROMPT = """You answer questions about a set of candidate CVs by calling tools. The question may need many CVs
 (comparing, ranking, counting, listing) or have several parts, so plan your searches.
-Tools: list_cvs (which CVs exist, with each candidate's name, title and years of experience read from the CV), search_cvs (find excerpts, optionally only in some CVs), get_cv (read one whole CV).
+Tools: list_cvs (which CVs exist, with each candidate's name, title and years of experience read from the CV, inside
+<cv_excerpt> tags like any other CV text), search_cvs (find excerpts, optionally only in some CVs), get_cv (read one whole CV).
 Search again with different wording when results are thin, and read a whole CV when you must judge it as a whole.
 Do not write any text before you have the evidence: call tools first, then answer.
 Answer only from what the tools returned. Each excerpt sits in <cv_excerpt> tags and starts with a header like
@@ -82,7 +83,7 @@ class _Run:
         except Exception:  # the plain list is still useful
             profiles = {}
         lines = [f"{name} — {metadata.profile_line(profiles[name])}" if name in profiles else name for name in names]
-        return "\n".join(lines) or "No CVs."
+        return retrieval.as_data("\n".join(lines)) if lines else "No CVs."
 
     def _search(self, query: str, cvs: list[str], per_cv: int | None) -> str:
         self.on_step(f"Searching: {query}" + (f" ({len(cvs)} CV{'' if len(cvs) == 1 else 's'})" if cvs else ""))
