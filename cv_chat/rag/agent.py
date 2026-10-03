@@ -1,0 +1,110 @@
+"""Agent for complex questions (compare, rank, count or list across CVs): a capped loop of model turns that call search tools."""
+import json
+import time
+from collections.abc import Callable, Iterator
+
+from cv_chat import config
+from cv_chat.rag import ingest, retrieval
+from cv_chat.services import openai_service, search_index
+
+SYSTEM_PROMPT = """You answer questions about a set of candidate CVs by calling tools. The question may need many CVs
+(comparing, ranking, counting, listing) or have several parts, so plan your searches.
+Tools: list_cvs (which CVs exist), search_cvs (find excerpts, optionally only in some CVs), get_cv (read one whole CV).
+Search again with different wording when results are thin, and read a whole CV when you must judge it as a whole.
+Answer only from what the tools returned. Each excerpt starts with a header like [CV: file name · section · p.N].
+Name the candidate behind every fact, and cite the evidence right after each claim as [file name, p.N] using the
+file name and page from the header (leave out ", p.N" when the header has no page). When you compare candidates,
+give each their own heading. If the CVs do not contain the answer, say so. Write concise Markdown."""
+
+TOOLS = [
+    {"type": "function", "function": {
+        "name": "list_cvs",
+        "description": "List the file names of all uploaded CVs.",
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "search_cvs",
+        "description": "Search the CVs and return the most relevant excerpts.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "What to look for, worded like a CV would say it."},
+            "cvs": {"type": "array", "items": {"type": "string"},
+                    "description": "Only search these CV file names. Omit to search all CVs."},
+        }, "required": ["query"]},
+    }},
+    {"type": "function", "function": {
+        "name": "get_cv",
+        "description": "Read one whole CV, in order.",
+        "parameters": {"type": "object", "properties": {
+            "file_name": {"type": "string", "description": "A file name from list_cvs."},
+        }, "required": ["file_name"]},
+    }},
+]
+
+
+class _Run:
+    """One agent run: executes the tools and remembers every excerpt it showed the model, for the Sources list."""
+
+    def __init__(self, on_step: Callable[[str], None]):
+        self.on_step = on_step
+        self.sources: dict[tuple, dict] = {}
+
+    def _show(self, chunks: list[dict]) -> str:
+        for chunk in chunks:
+            self.sources.setdefault((chunk["file_name"], chunk["section"], chunk["page"], chunk["content"]), chunk)
+        return "\n\n".join(retrieval.format_excerpt(chunk) for chunk in chunks) or "No matching excerpts."
+
+    def call(self, name: str, arguments: str) -> str:
+        try:
+            args = json.loads(arguments or "{}")
+            if name == "list_cvs":
+                self.on_step("Listing the CVs")
+                return "\n".join(ingest.list_cvs()) or "No CVs."
+            if name == "search_cvs":
+                return self._search(str(args["query"]), args.get("cvs") or [])
+            if name == "get_cv":
+                return self._get_cv(str(args["file_name"]))
+            return f"Error: unknown tool {name}"
+        except Exception as error:  # a failing tool is reported to the model, which can try something else
+            return f"Error: {str(error).splitlines()[0] if str(error) else type(error).__name__}"
+
+    def _search(self, query: str, cvs: list[str]) -> str:
+        self.on_step(f"Searching: {query}" + (f" ({len(cvs)} CV{'' if len(cvs) == 1 else 's'})" if cvs else ""))
+        file_ids = [ingest.file_id_for(name) for name in cvs] or None
+        return self._show(retrieval.spread_over_cvs(retrieval.search(query, [], file_ids)))
+
+    def _get_cv(self, file_name: str) -> str:
+        self.on_step(f"Reading {file_name}")
+        chunks = search_index.get_cv_chunks(ingest.file_id_for(file_name))
+        if not chunks:
+            return f"Error: no CV named '{file_name}'. Use a file name from list_cvs."
+        text = self._show(chunks)
+        return text[: config.AGENT_CV_CHARS] + ("\n[CV cut off]" if len(text) > config.AGENT_CV_CHARS else "")
+
+
+def run(question: str, recent: list[dict], on_step: Callable[[str], None]) -> tuple[Iterator[str], list[dict]]:
+    """Let the model plan and run searches for at most AGENT_MAX_ROUNDS rounds and AGENT_MAX_SECONDS seconds,
+    then return (answer as a stream, sources). Out of budget, it answers from what it has found so far."""
+    state = _Run(on_step)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}, *recent, {"role": "user", "content": question}]
+    deadline = time.monotonic() + config.AGENT_MAX_SECONDS
+    for _ in range(config.AGENT_MAX_ROUNDS):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        message = openai_service.chat_with_tools(messages, TOOLS, timeout=remaining)
+        if not message.tool_calls:
+            return iter([message.content or ""]), list(state.sources.values())
+        messages.append({
+            "role": "assistant", "content": message.content,
+            "tool_calls": [
+                {"id": c.id, "type": "function", "function": {"name": c.function.name, "arguments": c.function.arguments}}
+                for c in message.tool_calls
+            ],
+        })
+        for call in message.tool_calls:
+            messages.append({
+                "role": "tool", "tool_call_id": call.id, "content": state.call(call.function.name, call.function.arguments),
+            })
+    on_step("Writing the answer")
+    messages.append({"role": "user", "content": "The search budget is used up. Answer now, using only what the tools returned."})
+    return openai_service.chat_stream(messages), list(state.sources.values())

@@ -106,14 +106,32 @@ def delete_file_chunks(file_id: str) -> None:
     delete_stale_chunks(file_id, set())
 
 
-def hybrid_search(text: str, vector: list[float], k: int, section_types: list[str] | None = None) -> list[dict]:
+def get_cv_chunks(file_id: str) -> list[dict]:
+    """Every chunk of one CV in reading order."""
+    results = _search_client.search(
+        "*", filter=f"file_id eq '{file_id}'", select=["id", "file_name", "section", "page", "content"], top=1000
+    )
+    chunks = sorted(results, key=lambda r: int(r["id"].rsplit("-", 1)[1]))  # the id ends with the chunk's position
+    return [
+        {"file_name": c["file_name"], "section": c.get("section") or "", "page": c.get("page"), "content": c["content"], "caption": ""}
+        for c in chunks
+    ]
+
+
+def hybrid_search(
+    text: str, vector: list[float], k: int, section_types: list[str] | None = None, file_ids: list[str] | None = None
+) -> list[dict]:
     """Keyword and vector search in one query, merged, then re-ranked by the semantic ranker.
 
-    section_types limits the search to those standard sections (see processing/sections.py).
+    section_types limits the search to those standard sections (see processing/sections.py);
+    file_ids limits it to those CVs.
     """
-    section_filter = None
+    filters = []
     if section_types:
-        section_filter = f"search.in(section_type, '{','.join(section_types)}', ',')"
+        filters.append(f"search.in(section_type, '{','.join(section_types)}', ',')")
+    if file_ids:
+        filters.append(f"search.in(file_id, '{','.join(file_ids)}', ',')")
+    section_filter = " and ".join(filters) or None
     kwargs = dict(
         search_text=text,
         vector_queries=[VectorizedQuery(vector=vector, k_nearest_neighbors=k, fields="content_vector")],

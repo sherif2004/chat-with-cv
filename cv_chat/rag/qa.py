@@ -1,12 +1,15 @@
 """Question answering over the indexed CVs: route the question, retrieve the best chunks, stream the answer."""
 import json
-from collections.abc import Iterator
+import logging
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 from cv_chat import config
 from cv_chat.processing.sections import SECTION_TYPES
-from cv_chat.rag import retrieval
+from cv_chat.rag import agent, retrieval
 from cv_chat.services import openai_service
+
+log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You answer questions about a set of candidate CVs.
 Use only the CV excerpts in the user's message. Each excerpt starts with a header like [CV: file name · section · p.N].
@@ -81,21 +84,23 @@ def _expand(query: str) -> list[str]:
     return [q for q in dict.fromkeys(alternatives) if q != query][: config.EXPANDED_QUERIES]
 
 
-def _excerpt(source: dict) -> str:
-    where = f"{source['section']} · p.{source['page']}" if source.get("page") else source["section"]
-    return f"[CV: {source['file_name']} · {where}]\n{source['content']}"
-
-
-def ask(question: str, history: list[dict], expand: bool = False) -> tuple[Iterator[str], list[dict]]:
-    """Find the relevant CV chunks and start the answer. expand=True also searches reworded queries. Returns (answer text as a stream, sources)."""
+def ask(
+    question: str, history: list[dict], expand: bool = False, on_step: Callable[[str], None] = lambda step: None
+) -> tuple[Iterator[str], list[dict]]:
+    """Find the relevant CV chunks and start the answer. expand=True also searches reworded queries; on_step is told what the agent is doing on complex questions. Returns (answer text as a stream, sources)."""
     question = question.strip()
     route = _route(question, history)
     if route.kind == "chat":  # no search, no sources
         messages = [{"role": "system", "content": CHAT_PROMPT}, *_recent(history), {"role": "user", "content": question}]
         return openai_service.chat_stream(messages), []
+    if route.kind == "complex":  # needs more than the best chunks: let the agent plan its own searches
+        try:
+            return agent.run(route.query, _recent(history), on_step)
+        except Exception as error:  # fall back to the plain flow rather than lose the answer
+            log.warning("agent failed, using a single search: %s", error)
     queries = [route.query, *(_expand(route.query) if expand else [])]
     sources = retrieval.retrieve(queries, route.sections)
-    excerpts = "\n\n".join(_excerpt(s) for s in sources)
+    excerpts = "\n\n".join(retrieval.format_excerpt(s) for s in sources)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         *_recent(history),

@@ -57,6 +57,18 @@ def chat(messages: list[dict], json_mode: bool = False) -> str:
     return response.choices[0].message.content or ""
 
 
+def chat_with_tools(messages: list[dict], tools: list[dict], timeout: float | None = None):
+    """One turn of a tool-using conversation. Returns the model's message: its answer, or the tool calls it wants run."""
+    kwargs = {"tools": tools} if tools else {}
+    response = _explain_404(
+        config.CHAT_DEPLOYMENT,
+        lambda: _client.chat.completions.create(
+            model=config.CHAT_DEPLOYMENT, messages=messages, timeout=timeout, **kwargs
+        ),
+    )
+    return response.choices[0].message
+
+
 def chat_stream(messages: list[dict]) -> Iterator[str]:
     """Yield the answer piece by piece as the model writes it."""
     stream = _explain_404(

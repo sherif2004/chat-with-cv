@@ -197,6 +197,7 @@ chat-with-cv/
     │   ├── chunking.py           # pages to section-based chunks
     │   └── sections.py           # heading to standard section type
     ├── rag/                  # the two pipelines
+    │   ├── agent.py              # tool-using agent for complex questions (capped rounds and time)
     │   ├── ingest.py             # upload flow: skip check, extract, chunk, embed, save; delete
     │   ├── jobs.py               # background queue: runs CVs in parallel and tracks each file's state
     │   ├── qa.py                 # question flow: route, expand, search, stream answer
@@ -243,6 +244,9 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 | `MAX_CHUNKS_PER_CV` | `2` | Most chunks one CV can contribute to an answer |
 | `EXPANDED_QUERIES` | `2` | Alternative queries searched when **Query expansion** is on |
 | `RRF_K` | `60` | Reciprocal rank fusion constant used to merge the searches |
+| `AGENT_MAX_ROUNDS` | `5` | Tool rounds the agent may take for one complex question |
+| `AGENT_MAX_SECONDS` | `30` | Time budget for those rounds, then it answers with what it found |
+| `AGENT_CV_CHARS` | `12000` | Most characters of one CV the `get_cv` tool hands to the model |
 | `TOP_K` | `10` | Chunks sent to the chat model for each question |
 | `MIN_FILTERED_RESULTS` | `3` | Fewer section-filtered hits than this and the search runs again on all sections |
 | `HISTORY_MESSAGES` | `6` | Recent chat messages used for the router and sent with each question |
@@ -285,7 +289,7 @@ Improvements to the chat side, in the order they are built. Steps marked *done* 
 - *Why:* CVs word the same thing differently ("built APIs" versus "REST services"), so one query can miss relevant chunks.
 - *Cost:* one more model call and three searches per question, so answers start about 1 to 2 seconds later. Each search uses the semantic ranker, which has a monthly query quota on lower tiers.
 
-### 3. Agent for complex questions
+### 3. Agent for complex questions (done)
 
 - Questions the router marks *complex* (comparing, ranking, counting or listing across many CVs, or questions with several parts) go to a capped tool-using agent with three tools: `search_cvs` (search, optionally limited to some CVs), `get_cv` (read a whole CV) and `list_cvs` (see which CVs exist). It plans its searches, retries with different wording, and answers only from what the tools returned. Its steps are shown while it works.
 - Limits: at most 5 rounds and about 30 seconds.
