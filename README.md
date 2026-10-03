@@ -60,7 +60,8 @@ flowchart LR
     A["CV file<br/>PDF or DOCX"] --> H{"Already indexed<br/>and unchanged?"}
     H -- yes --> Z["Skip"]
     H -- no --> B["Extract with Docling<br/>layout, headings, tables"]
-    B --> C["Split by section"]
+    B --> M["Read name, title,<br/>years, contact<br/>one model call"]
+    M --> C["Split by section"]
     C --> D["Embed each chunk<br/>Azure OpenAI"]
     D --> E[("Azure AI Search<br/>chunks and vectors")]
     A --> F[("Azure Blob Storage<br/>original file")]
@@ -68,9 +69,10 @@ flowchart LR
 
 1. **Skip unchanged CVs.** Every chunk is stored with a hash of the file content (plus a fingerprint of the extraction and chunking code and settings). If the stored hash matches, the CV is skipped and shown as "already indexed, unchanged".
 2. **Extract with Docling.** [Docling](https://github.com/docling-project/docling) reads the page layout, so multi-column CVs come out in the right reading order, tables become markdown, and section headings are detected. It handles PDF and DOCX. The result is cached on disk in `.cache/extracted/` (by file content), so changing the chunking never runs Docling again.
+3. **Read the CV's metadata.** One model call reads the candidate's name, current job title, total years of experience (counted from the dated jobs), email, phone and location. They are stored on every chunk of that CV. If the call fails or is refused, the CV is still indexed with empty metadata. The values come from a model, so treat years of experience as an estimate. Contact details are personal data: they are stored in the search index like the rest of the CV text.
 3. **Split by section.** The CV is cut at its headings (the ones Docling found, plus short ALL-CAPS lines). Each section becomes one chunk and starts with its heading. Only a section longer than `CHUNK_SIZE` (1500 characters) is split further, with 20% overlap, preferring line breaks. Text before the first heading goes under "Other".
 4. **Label each chunk.** The heading is kept as `section` (as written in the CV) and also mapped to a standard `section_type`: experience, education, skills, projects, summary, certifications, languages, contact or other. The page number is stored too.
-5. **Embed each chunk.** An embedding is a list of numbers that captures the meaning of a text. Each chunk is sent to Azure OpenAI together with its file name, so even a chunk from page 3 still points to the right CV. Requests go out in batches of 16, and a shared limit of 2 requests in flight keeps parallel CVs from hitting rate limits.
+5. **Embed each chunk.** An embedding is a list of numbers that captures the meaning of a text. Each chunk is sent to Azure OpenAI together with its file name and the candidate's name and title, so even a chunk from page 3 still points to the right CV. Requests go out in batches of 16, and a shared limit of 2 requests in flight keeps parallel CVs from hitting rate limits.
 6. **Save to Azure AI Search.** The new chunks are uploaded first, then chunks the new version no longer has are deleted, so a CV is never missing from the index.
 7. **Save the original** to Azure Blob Storage.
 
@@ -164,7 +166,7 @@ The browser opens automatically. The Blob container and the search index are cre
 ## Using the app
 
 1. **Upload.** In the sidebar, drop CVs (PDF or DOCX) into the upload box. **Process CVs** stays disabled until the knowledge base would hold at least 8 CVs (the ones already indexed plus the new files), and the chat stays disabled while there are fewer than 8.
-2. **Process.** Click **Process CVs**. The files are processed in the background, 4 at a time, and a live status list in the sidebar refreshes every 2 seconds. Each file shows *waiting*, then the stage it is in (*reading layout*, *embedding*, *saving*), then a green check with its chunk count, a grey check if it was already indexed and unchanged, or a red mark and the reason if it failed. A progress bar and a line such as "4 running in parallel · 3 waiting" show the whole batch. You can keep using the app while it runs; when the last file finishes the CV list updates by itself. **Clear status** removes the finished entries.
+2. **Process.** Click **Process CVs**. The files are processed in the background, 4 at a time, and a live status list in the sidebar refreshes every 2 seconds. Each file shows *waiting*, then the stage it is in (*reading layout*, *reading name, title and experience*, *embedding*, *saving*), then a green check with its chunk count, a grey check if it was already indexed and unchanged, or a red mark and the reason if it failed. A progress bar and a line such as "4 running in parallel · 3 waiting" show the whole batch. You can keep using the app while it runs; when the last file finishes the CV list updates by itself. **Clear status** removes the finished entries.
 3. **Ask.** Type a question, or click one of the suggested questions on the welcome screen. The answer streams in as it is written.
 4. **Check the sources.** Open **Sources** under an answer to see which CVs it used and the most relevant passage of each.
 5. **Manage a CV.** Open **Manage a CV** in the sidebar, pick a CV, then:
@@ -246,6 +248,8 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 | `EXPANDED_QUERIES` | `2` | Alternative queries searched when **Query expansion** is on |
 | `RRF_K` | `60` | Reciprocal rank fusion constant used to merge the searches |
 | `CACHE_SIZE` | `256` | Entries kept per kind of cached result (router, search, answer) |
+| `METADATA_CHARS` | `12000` | Most characters of a CV read for its metadata |
+| `MAX_YEARS` | `60` | A years-of-experience value above this is treated as wrong |
 | `AGENT_MAX_ROUNDS` | `5` | Tool rounds the agent may take for one complex question |
 | `AGENT_MAX_SECONDS` | `30` | Time budget for those rounds, then it answers with what it found |
 | `AGENT_SEARCH_K` | `20` | Most excerpts one agent search hands to the model (one per CV by default, so a search reaches up to 20 CVs) |
@@ -308,6 +312,10 @@ Improvements to the chat side, in the order they were built. All four steps are 
 - *Why:* repeated and slightly re-asked questions answer faster and cost less.
 - *Cost:* low. The existing in-memory cache of query embeddings (`EMBED_CACHE_SIZE`) stays.
 
+### Search boosts and CV metadata
+
+Keyword matching uses a scoring profile (`cv`): a match in the candidate name counts 3 times as much as the same words in the body text, job title and file name 2 times, the section heading 1.5 times, and chunks from the *experience* and *skills* sections get a further boost. The semantic ranker then re-orders the best results as before. The agent's `list_cvs` tool returns every CV with its name, title and years of experience, so ranking by experience needs no reading of CVs.
+
 What stays as it is today: the section filter, the limit of 2 chunks per CV, streamed answers, and delete and re-index.
 
 ---
@@ -319,7 +327,7 @@ Most problems now show a message that says what to check. These are the ones you
 | What you see | What it means and what to do |
 |---|---|
 | `Missing 'AZURE_...' in .env` | Lists every empty or missing value at once. Copy `.env.example` to `.env`, fill them in and restart the app |
-| `The index '...' was made by an older version` | The index settings changed (English text analyzer, filterable file names, explicit cosine metric) and Azure cannot change these in place. Delete the index in the Azure portal, or set a new `AZURE_SEARCH_INDEX` in `.env`, restart the app, then open **Manage a CV** and click **Update outdated CVs** to index the stored CVs again |
+| `The index '...' was made by an older version` | The index settings changed (English text analyzer, filterable file names, explicit cosine metric, CV metadata fields, a scoring profile, searchable section headings) and Azure cannot change these in place. Delete the index in the Azure portal, or set a new `AZURE_SEARCH_INDEX` in `.env`, restart the app, then open **Manage a CV** and click **Update outdated CVs** to index the stored CVs again |
 | `Could not connect to Azure` at start-up | A value in `.env` is malformed, most often the storage connection string. Copy it again from the portal |
 | `Azure OpenAI has no deployment named '...'` | Use the **deployment name** (not the model name) exactly as in the portal. The endpoint is cleaned up for you (a trailing `/openai/v1` is removed), but the API version must look like `2024-10-21` |
 | `The index '...' stores vectors of length N` | The index was created with another embedding model. Delete the index in the Azure portal or set a new `AZURE_SEARCH_INDEX`, then process the CVs again |

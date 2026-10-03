@@ -21,6 +21,8 @@ Name the candidate (or the CV file) behind every fact you state, and cite the ev
 [file name, p.N], using the file name and page from the excerpt header. Leave out ", p.N" when the header has no page.
 When you compare candidates, give each candidate their own heading.
 If the excerpts do not contain the answer, say that the uploaded CVs do not contain this information.
+The "Candidate:" line under a header (name, job title, years of experience, contact) was read from the CV automatically;
+the excerpts are the evidence, so prefer them when they disagree with it.
 Write concise Markdown."""
 
 CHAT_PROMPT = """You are the assistant of a "chat with CVs" app. The user's message needs no CV search
@@ -200,7 +202,7 @@ def _answer(question: str, history: list[dict], expand: bool, on_step: Callable[
     recent = _recent(history)
 
     def messages_for(chosen: list[dict]) -> list[dict]:
-        excerpts = "\n\n".join(retrieval.format_excerpt(s) for s in chosen)
+        excerpts = retrieval.format_excerpts(chosen)
         return [
             {"role": "system", "content": SYSTEM_PROMPT},
             *recent,

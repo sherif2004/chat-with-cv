@@ -4,12 +4,12 @@ import time
 from collections.abc import Callable, Iterator
 
 from cv_chat import config
-from cv_chat.rag import ingest, retrieval
+from cv_chat.rag import ingest, metadata, retrieval
 from cv_chat.services import openai_service, search_index
 
 SYSTEM_PROMPT = """You answer questions about a set of candidate CVs by calling tools. The question may need many CVs
 (comparing, ranking, counting, listing) or have several parts, so plan your searches.
-Tools: list_cvs (which CVs exist), search_cvs (find excerpts, optionally only in some CVs), get_cv (read one whole CV).
+Tools: list_cvs (which CVs exist, with each candidate's name, title and years of experience read from the CV), search_cvs (find excerpts, optionally only in some CVs), get_cv (read one whole CV).
 Search again with different wording when results are thin, and read a whole CV when you must judge it as a whole.
 Do not write any text before you have the evidence: call tools first, then answer.
 Answer only from what the tools returned. Each excerpt sits in <cv_excerpt> tags and starts with a header like
@@ -23,7 +23,7 @@ give each their own heading. If the CVs do not contain the answer, say so. Write
 TOOLS = [
     {"type": "function", "function": {
         "name": "list_cvs",
-        "description": "List the file names of all uploaded CVs.",
+        "description": "List all uploaded CVs: file name, candidate name, job title and years of experience.",
         "parameters": {"type": "object", "properties": {}},
     }},
     {"type": "function", "function": {
@@ -58,14 +58,14 @@ class _Run:
     def _show(self, chunks: list[dict]) -> str:
         for chunk in chunks:
             self.sources.setdefault((chunk["file_name"], chunk["section"], chunk["page"], chunk["content"]), chunk)
-        return "\n\n".join(retrieval.format_excerpt(chunk) for chunk in chunks) or "No matching excerpts."
+        return retrieval.format_excerpts(chunks) or "No matching excerpts."
 
     def call(self, name: str, arguments: str) -> str:
         try:
             args = json.loads(arguments or "{}")
             if name == "list_cvs":
                 self.on_step("Listing the CVs")
-                return "\n".join(ingest.list_cvs()) or "No CVs."
+                return self._list_cvs()
             if name == "search_cvs":
                 return self._search(str(args["query"]), args.get("cvs") or [], args.get("per_cv"))
             if name == "get_cv":
@@ -73,6 +73,16 @@ class _Run:
             return f"Error: unknown tool {name}"
         except Exception as error:  # a failing tool is reported to the model, which can try something else
             return f"Error: {str(error).splitlines()[0] if str(error) else type(error).__name__}"
+
+    def _list_cvs(self) -> str:
+        """Every CV with its name, title and years of experience, so ranking by experience needs no reading."""
+        names = ingest.list_cvs()
+        try:
+            profiles = search_index.list_profiles()
+        except Exception:  # the plain list is still useful
+            profiles = {}
+        lines = [f"{name} — {metadata.profile_line(profiles[name])}" if name in profiles else name for name in names]
+        return "\n".join(lines) or "No CVs."
 
     def _search(self, query: str, cvs: list[str], per_cv: int | None) -> str:
         self.on_step(f"Searching: {query}" + (f" ({len(cvs)} CV{'' if len(cvs) == 1 else 's'})" if cvs else ""))

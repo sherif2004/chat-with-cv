@@ -8,6 +8,10 @@ from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
     HnswAlgorithmConfiguration,
     HnswParameters,
+    ScoringProfile,
+    TagScoringFunction,
+    TagScoringParameters,
+    TextWeights,
     SearchableField,
     SearchField,
     SearchFieldDataType,
@@ -26,6 +30,9 @@ from cv_chat import config
 
 log = logging.getLogger(__name__)
 SEMANTIC_CONFIG = "default"
+SCORING_PROFILE = "cv"
+BOOSTED_SECTIONS = ["experience", "skills"]  # chunks from these sections rank a little higher for keyword matches
+META_FIELDS = ["candidate_name", "job_title", "years_experience", "email", "phone", "location"]
 ANALYZER = "en.microsoft"  # English stemming and stop words for keyword search ("built" also finds "building")
 
 _credential = AzureKeyCredential(config.SEARCH_KEY)
@@ -48,6 +55,10 @@ def _outdated_settings(index: SearchIndex) -> list[str]:
         problems.append(f"the text analyzer of 'content' is not {ANALYZER}")
     if not getattr(fields.get("file_name"), "filterable", False):
         problems.append("'file_name' is not filterable")
+    if "candidate_name" not in fields:
+        problems.append("the CV metadata fields (candidate name, job title, years, contact) are missing")
+    if not any(profile.name == SCORING_PROFILE for profile in index.scoring_profiles or []):
+        problems.append("the scoring profile that boosts names, titles and sections is missing")
     algorithms = index.vector_search.algorithms if index.vector_search else []
     if not any(getattr(a.parameters, "metric", None) == "cosine" for a in algorithms):
         problems.append("the vector similarity metric is not cosine")
@@ -74,10 +85,16 @@ def ensure_index(dimensions: int) -> None:
         SimpleField(name="id", type=SearchFieldDataType.String, key=True),
         SimpleField(name="file_id", type=SearchFieldDataType.String, filterable=True),
         SearchableField(name="file_name", filterable=True),  # keyword search also matches names in file names
-        SimpleField(name="section", type=SearchFieldDataType.String, filterable=True, facetable=True),
+        SearchableField(name="section", filterable=True, facetable=True),  # headings are searchable and weighted too
         SimpleField(name="section_type", type=SearchFieldDataType.String, filterable=True),
         SimpleField(name="page", type=SearchFieldDataType.Int32, filterable=True),
         SimpleField(name="content_hash", type=SearchFieldDataType.String),
+        SearchableField(name="candidate_name", filterable=True),
+        SearchableField(name="job_title", filterable=True),
+        SimpleField(name="years_experience", type=SearchFieldDataType.Double, filterable=True, sortable=True),
+        SimpleField(name="email", type=SearchFieldDataType.String),
+        SimpleField(name="phone", type=SearchFieldDataType.String),
+        SimpleField(name="location", type=SearchFieldDataType.String),
         SearchableField(name="content", analyzer_name=ANALYZER),
         SearchField(
             name="content_vector",
@@ -99,9 +116,19 @@ def ensure_index(dimensions: int) -> None:
             keywords_fields=[SemanticField(field_name="section")],  # the heading tells the ranker what the text is about
         ),
     )])
-    _index_client.create_or_update_index(
-        SearchIndex(name=config.SEARCH_INDEX, fields=fields, vector_search=vector_search, semantic_search=semantic_search)
-    )
+    scoring_profiles = [ScoringProfile(
+        name=SCORING_PROFILE,
+        # Keyword matches in a name or title count more than the same words in the body text.
+        text_weights=TextWeights(weights={"candidate_name": 3.0, "job_title": 2.0, "file_name": 2.0, "section": 1.5, "content": 1.0}),
+        functions=[TagScoringFunction(
+            field_name="section_type", boost=1.5, parameters=TagScoringParameters(tags_parameter="boostSections"),
+        )],
+        function_aggregation="sum",
+    )]
+    _index_client.create_or_update_index(SearchIndex(
+        name=config.SEARCH_INDEX, fields=fields, vector_search=vector_search, semantic_search=semantic_search,
+        scoring_profiles=scoring_profiles,
+    ))
 
 
 def upload_chunks(docs: list[dict]) -> None:
@@ -130,14 +157,24 @@ def delete_file_chunks(file_id: str) -> None:
     delete_stale_chunks(file_id, set())
 
 
+def list_profiles() -> dict[str, dict]:
+    """The metadata of every indexed CV, by file name (read from one chunk of each CV)."""
+    results = _search_client.search("*", select=["file_name", *META_FIELDS], top=1000)
+    profiles: dict[str, dict] = {}
+    for result in results:
+        profiles.setdefault(result["file_name"], {name: result.get(name) for name in META_FIELDS})
+    return profiles
+
+
 def get_cv_chunks(file_id: str) -> list[dict]:
     """Every chunk of one CV in reading order."""
     results = _search_client.search(
-        "*", filter=f"file_id eq '{file_id}'", select=["id", "file_name", "section", "page", "content"], top=1000
+        "*", filter=f"file_id eq '{file_id}'", select=["id", "file_name", "section", "page", "content", *META_FIELDS], top=1000
     )
     chunks = sorted(results, key=lambda r: int(r["id"].rsplit("-", 1)[1]))  # the id ends with the chunk's position
     return [
-        {"file_name": c["file_name"], "section": c.get("section") or "", "page": c.get("page"), "content": c["content"], "caption": ""}
+        {"file_name": c["file_name"], "section": c.get("section") or "", "page": c.get("page"), "content": c["content"], "caption": "",
+         **{name: c.get(name) for name in META_FIELDS}}
         for c in chunks
     ]
 
@@ -160,7 +197,9 @@ def hybrid_search(
         search_text=text,
         vector_queries=[VectorizedQuery(vector=vector, k_nearest_neighbors=k, fields="content_vector")],
         filter=section_filter,
-        select=["file_name", "section", "page", "content"],
+        select=["file_name", "section", "page", "content", *META_FIELDS],
+        scoring_profile=SCORING_PROFILE,
+        scoring_parameters=[f"boostSections-{','.join(BOOSTED_SECTIONS)}"],
         top=k,
     )
     try:
@@ -182,5 +221,6 @@ def hybrid_search(
         found.append({
             "file_name": result["file_name"], "section": result.get("section") or "", "page": result.get("page"),
             "content": result["content"], "caption": captions[0].text if captions and captions[0].text else "",
+            **{name: result.get(name) for name in META_FIELDS},
         })
     return found

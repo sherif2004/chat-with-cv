@@ -13,6 +13,7 @@ from cv_chat.processing import chunking, extract, sections
 from cv_chat.processing.chunking import chunk_cv
 from cv_chat.processing.extract import extract_cv
 from cv_chat.processing.sections import section_type
+from cv_chat.rag import metadata
 from cv_chat.rag.cache import cache
 from cv_chat.services import blob_storage, openai_service, search_index
 
@@ -21,7 +22,7 @@ from cv_chat.services import blob_storage, openai_service, search_index
 def _pipeline_fingerprint() -> bytes:
     """Changes whenever the extraction or chunking code or its settings change, so those CVs get re-indexed by themselves."""
     digest = hashlib.md5(f"{config.CHUNK_SIZE}/{config.CHUNK_OVERLAP}".encode())
-    for module in (extract, chunking, sections):
+    for module in (extract, chunking, sections, metadata):
         digest.update(Path(module.__file__).read_bytes())
     return digest.digest()
 
@@ -48,16 +49,19 @@ def process_cv(
     if not any(text.strip() for _, text in document.pages):
         raise ValueError("No text found (scanned PDF?)")
 
+    on_stage("reading name, title and experience")
+    meta = metadata.extract_metadata(document.pages)
     chunks = chunk_cv(document.pages, document.headers, config.CHUNK_SIZE, config.CHUNK_OVERLAP)
     on_stage("embedding")
     # Embed each chunk together with its file name, so chunks from later pages still point to the candidate.
-    vectors = openai_service.embed([f"CV: {file_name}\n{chunk.text}" for chunk in chunks])
+    who = f"\nCandidate: {meta['candidate_name']}, {meta['job_title']}" if meta["candidate_name"] else ""
+    vectors = openai_service.embed([f"CV: {file_name}{who}\n{chunk.text}" for chunk in chunks])
 
     docs = [
         {
             "id": f"{file_id}-{i}", "file_id": file_id, "file_name": file_name,
             "section": chunk.section, "section_type": section_type(chunk.section), "page": chunk.page,
-            "content": chunk.text, "content_hash": content_hash, "content_vector": vector,
+            "content": chunk.text, "content_hash": content_hash, "content_vector": vector, **meta,
         }
         for i, (chunk, vector) in enumerate(zip(chunks, vectors))
     ]

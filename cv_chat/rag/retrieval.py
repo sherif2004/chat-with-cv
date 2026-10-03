@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
 from cv_chat import config
+from cv_chat.rag import metadata
 from cv_chat.rag.cache import SEARCH, cache
 from cv_chat.services import openai_service, search_index
 
@@ -70,14 +71,26 @@ def spread_over_cvs(
 _TAG = re.compile(r"</?\s*cv_excerpt[^>]*>", re.IGNORECASE)
 
 
-def format_excerpt(chunk: dict) -> str:
+def format_excerpt(chunk: dict, with_profile: bool = False) -> str:
     """A chunk as the model sees it: a header naming its CV, section and page, then the text, inside <cv_excerpt> tags.
 
-    The tags mark the text as data (see the system prompts). Tags inside the CV text are removed, so a CV cannot close
-    the block early and pass its own text off as instructions.
+    with_profile adds one line about the candidate (name, title, years, contact). The tags mark the text as data (see
+    the system prompts). Tags inside the CV text are removed, so a CV cannot close the block early and pass its own
+    text off as instructions.
     """
     where = f"{chunk['section']} · p.{chunk['page']}" if chunk.get("page") else chunk["section"]
-    text = f"[CV: {chunk['file_name']} · {where}]\n{chunk['content']}"
+    profile = metadata.profile_line(chunk) if with_profile else ""
+    text = f"[CV: {chunk['file_name']} · {where}]\n" + (f"Candidate: {profile}\n" if profile else "") + chunk["content"]
     while (stripped := _TAG.sub("", text)) != text:  # repeat: removing a tag can join the pieces around it into a new one
         text = stripped
     return f"<cv_excerpt>\n{text}\n</cv_excerpt>"
+
+
+def format_excerpts(chunks: list[dict]) -> str:
+    """Several chunks for the model. The first excerpt of each CV also carries the candidate line."""
+    seen: set[str] = set()
+    parts = []
+    for chunk in chunks:
+        parts.append(format_excerpt(chunk, with_profile=chunk["file_name"] not in seen))
+        seen.add(chunk["file_name"])
+    return "\n\n".join(parts)
