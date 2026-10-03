@@ -15,6 +15,13 @@ Built on **Azure Blob Storage**, **Azure AI Search** and **Azure OpenAI**.
 
 One failing file (for example, a scanned PDF with no text) never stops the others.
 
+**Question answering**: for every question:
+
+1. Embed the question. Embeddings are cached in memory, so a repeated question skips this call.
+2. Run a hybrid search (keyword + vector) in Azure AI Search for the 10 most relevant chunks.
+3. Send the system prompt, the recent chat history, the chunks and the question to the Azure OpenAI chat model.
+4. Return the answer together with the chunks it was based on.
+
 ## Project structure
 
 ```
@@ -33,7 +40,7 @@ You need [uv](https://docs.astral.sh/uv/) and these Azure resources:
 
 - a Storage account
 - an AI Search service
-- an Azure OpenAI resource with an embedding deployment (for example `text-embedding-3-small`)
+- an Azure OpenAI resource with an embedding deployment (for example `text-embedding-3-small`) and a chat deployment (for example `gpt-4o-mini`)
 
 ```bash
 uv sync
@@ -51,3 +58,9 @@ uv run python -c "from pathlib import Path; from cv_chat.rag.ingest import proce
 ```
 
 Each CV prints its chunk count, or the error that stopped it.
+
+## Try a question
+
+```bash
+uv run python -c "from cv_chat.rag.qa import ask; print(ask('Which candidates know Python?', [])[0])"
+```

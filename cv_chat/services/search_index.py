@@ -12,6 +12,7 @@ from azure.search.documents.indexes.models import (
     VectorSearch,
     VectorSearchProfile,
 )
+from azure.search.documents.models import VectorizedQuery
 
 from cv_chat import config
 
@@ -46,3 +47,14 @@ def upload_chunks(docs: list[dict]) -> None:
     failed = [result.key for result in results if not result.succeeded]
     if failed:
         raise RuntimeError(f"Search index rejected {len(failed)} chunk(s), e.g. {failed[0]}")
+
+
+def hybrid_search(text: str, vector: list[float], k: int) -> list[dict]:
+    """Keyword and vector search in one query; Azure AI Search merges both rankings."""
+    results = _search_client.search(
+        search_text=text,
+        vector_queries=[VectorizedQuery(vector=vector, k_nearest_neighbors=k, fields="content_vector")],
+        select=["file_name", "content"],
+        top=k,
+    )
+    return [{"file_name": result["file_name"], "content": result["content"]} for result in results]
