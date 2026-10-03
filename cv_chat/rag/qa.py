@@ -110,7 +110,7 @@ def ask(
     """Find the relevant CV chunks and start the answer. Returns (answer text as a stream, sources).
 
     expand=True also searches reworded queries. cache_answers=True reuses the answer to an identical question with an
-    identical chat. on_step is told what the agent is doing on complex questions.
+    identical chat. on_step is told each step as it starts (routing decision, searches, agent tool calls).
     """
     question = question.strip()
     if not cache_answers:
@@ -126,14 +126,19 @@ def ask(
 def _answer(question: str, history: list[dict], expand: bool, on_step: Callable[[str], None]) -> tuple[Iterator[str], list[dict]]:
     route = _route(question, history)
     if route.kind == "chat":  # no search, no sources
+        on_step("Chat message, no search needed")
         messages = [{"role": "system", "content": CHAT_PROMPT}, *_recent(history), {"role": "user", "content": question}]
         return openai_service.chat_stream(messages), []
     if route.kind == "complex":  # needs more than the best chunks: let the agent plan its own searches
+        on_step("Complex question: planning the searches")
         try:
             return agent.run(route.query, _recent(history), on_step)
         except Exception as error:  # fall back to the plain flow rather than lose the answer
             log.warning("agent failed, using a single search: %s", error)
+    if expand:
+        on_step("Rewording the question for a wider search")
     queries = [route.query, *(_expand(route.query) if expand else [])]
+    on_step(f"Searching the CVs with {len(queries)} quer{'y' if len(queries) == 1 else 'ies'}")
     sources = retrieval.retrieve(queries, route.sections)
     excerpts = "\n\n".join(retrieval.format_excerpt(s) for s in sources)
     messages = [
