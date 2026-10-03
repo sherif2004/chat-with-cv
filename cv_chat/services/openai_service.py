@@ -57,16 +57,39 @@ def chat(messages: list[dict], json_mode: bool = False) -> str:
     return response.choices[0].message.content or ""
 
 
-def chat_with_tools(messages: list[dict], tools: list[dict], timeout: float | None = None):
-    """One turn of a tool-using conversation. Returns the model's message: its answer, or the tool calls it wants run."""
-    kwargs = {"tools": tools} if tools else {}
-    response = _explain_404(
+def chat_with_tools(messages: list[dict], tools: list[dict], timeout: float | None = None) -> tuple[str, object]:
+    """One streamed turn of a tool-using conversation.
+
+    Returns ("answer", pieces) as soon as the model starts writing text, so the caller can stream it on, or
+    ("calls", [{"id", "name", "arguments"}, ...]) when the model asked for tools instead.
+    """
+    stream = _explain_404(
         config.CHAT_DEPLOYMENT,
         lambda: _client.chat.completions.create(
-            model=config.CHAT_DEPLOYMENT, messages=messages, timeout=timeout, **kwargs
+            model=config.CHAT_DEPLOYMENT, messages=messages, tools=tools, stream=True, timeout=timeout
         ),
     )
-    return response.choices[0].message
+    calls: dict[int, dict] = {}
+    for chunk in stream:
+        if not chunk.choices:  # some chunks carry only filter metadata
+            continue
+        delta = chunk.choices[0].delta
+        for call in delta.tool_calls or []:
+            entry = calls.setdefault(call.index, {"id": "", "name": "", "arguments": ""})
+            entry["id"] += call.id or ""
+            if call.function:
+                entry["name"] += call.function.name or ""
+                entry["arguments"] += call.function.arguments or ""
+        if delta.content and not calls:  # text before any tool call is the answer
+            return "answer", _continue(delta.content, stream)
+    return "calls", [calls[index] for index in sorted(calls)]
+
+
+def _continue(first: str, stream) -> Iterator[str]:
+    yield first
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
 
 
 def chat_stream(messages: list[dict]) -> Iterator[str]:

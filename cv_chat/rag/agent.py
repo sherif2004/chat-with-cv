@@ -11,6 +11,7 @@ SYSTEM_PROMPT = """You answer questions about a set of candidate CVs by calling 
 (comparing, ranking, counting, listing) or have several parts, so plan your searches.
 Tools: list_cvs (which CVs exist), search_cvs (find excerpts, optionally only in some CVs), get_cv (read one whole CV).
 Search again with different wording when results are thin, and read a whole CV when you must judge it as a whole.
+Do not write any text before you have the evidence: call tools first, then answer.
 Answer only from what the tools returned. Each excerpt starts with a header like [CV: file name · section · p.N].
 Name the candidate behind every fact, and cite the evidence right after each claim as [file name, p.N] using the
 file name and page from the header (leave out ", p.N" when the header has no page). When you compare candidates,
@@ -91,20 +92,20 @@ def run(question: str, recent: list[dict], on_step: Callable[[str], None]) -> tu
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        message = openai_service.chat_with_tools(messages, TOOLS, timeout=remaining)
-        if not message.tool_calls:
-            return iter([message.content or ""]), list(state.sources.values())
+        kind, result = openai_service.chat_with_tools(messages, TOOLS, timeout=remaining)
+        if kind == "answer":  # streamed on as it is written; the sources are complete by now
+            return result, list(state.sources.values())
+        if not result:  # the model produced nothing: fall through to the forced answer
+            break
         messages.append({
-            "role": "assistant", "content": message.content,
+            "role": "assistant", "content": None,
             "tool_calls": [
-                {"id": c.id, "type": "function", "function": {"name": c.function.name, "arguments": c.function.arguments}}
-                for c in message.tool_calls
+                {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["arguments"]}}
+                for c in result
             ],
         })
-        for call in message.tool_calls:
-            messages.append({
-                "role": "tool", "tool_call_id": call.id, "content": state.call(call.function.name, call.function.arguments),
-            })
+        for call in result:
+            messages.append({"role": "tool", "tool_call_id": call["id"], "content": state.call(call["name"], call["arguments"])})
     on_step("Writing the answer")
     messages.append({"role": "user", "content": "The search budget is used up. Answer now, using only what the tools returned."})
     return openai_service.chat_stream(messages), list(state.sources.values())
