@@ -1,4 +1,6 @@
 """The Details dropdown under each answer: how the question was routed, what was searched and used, and where the time went."""
+import re
+
 import streamlit as st
 
 ROUTE_NAMES = {"chat": "Chat message", "simple": "Simple question", "complex": "Complex question"}
@@ -6,6 +8,20 @@ STAGE_NAMES = {
     "route": "Router", "expand": "Query expansion", "search": "Search", "agent_model": "Agent (model)", "tool": "Agent (tool)",
     "model": "Model (starting)", "cache": "Cache", "filter": "Safety filter", "generate": "Write answer",
 }
+
+
+_MARKDOWN = re.compile(r"([\\`*_{}\[\]()#+\-.!|<>~$:&])")
+
+
+def esc(text) -> str:
+    """Text from a CV, a file name or a model, made safe to draw with st.markdown. Without this, a file name or CV line
+    such as ![x](https://attacker/?q=1) would render as an image and make the browser load that address."""
+    return _MARKDOWN.sub(r"\\\1", str(text))
+
+
+def code(text) -> str:
+    """The same, as an inline code span (backslashes do not work inside one, so backticks are replaced)."""
+    return "`" + str(text).replace("`", "'") + "`"
 
 
 def fmt(ms: float | None) -> str:
@@ -93,8 +109,8 @@ def _router(events: list[dict], route: str) -> None:
         st.caption("No router result was recorded.")
         return
     info = router["info"]
-    st.markdown(f"**Classified as:** {route}  \n**Standalone question:** {info.get('query', '')}  \n"
-                f"**Sections to search:** {', '.join(info['sections']) if info.get('sections') else 'all'}  \n"
+    st.markdown(f"**Classified as:** {route}  \n**Standalone question:** {esc(info.get('query', ''))}  \n"
+                f"**Sections to search:** {esc(', '.join(info['sections'])) if info.get('sections') else 'all'}  \n"
                 f"**Router call:** {fmt(router['ms'])}" + (" (cached)" if info.get("cached") else ""))
     if info.get("failed"):
         st.warning("The router call failed, so the question was searched as written.", icon=":material/warning:")
@@ -104,7 +120,7 @@ def _router(events: list[dict], route: str) -> None:
 def _searches(events: list[dict], expansion: bool) -> None:
     expand = next((e for e in events if e["stage"] == "expand"), None)
     if expand and expand["info"]["queries"]:
-        st.markdown("**Reworded queries** (" + fmt(expand["ms"]) + "): " + " · ".join(f"`{q}`" for q in expand["info"]["queries"]))
+        st.markdown("**Reworded queries** (" + fmt(expand["ms"]) + "): " + " · ".join(code(q) for q in expand["info"]["queries"]))
     elif expansion:
         st.caption("Query expansion was on but produced no extra queries.")
     searches = [e for e in events if e["stage"] == "search"]
@@ -118,22 +134,22 @@ def _searches(events: list[dict], expansion: bool) -> None:
         else:
             parts.append(f"embedding {fmt(info['embed_ms'])}")
         if info["sections"]:
-            parts.append("sections: " + ", ".join(info["sections"]) + (" (no hits, searched everything)" if info["fallback"] else ""))
+            parts.append("sections: " + esc(", ".join(info["sections"])) + (" (no hits, searched everything)" if info["fallback"] else ""))
         if info["cvs"]:
             parts.append(f"limited to {info['cvs']} CV{'' if info['cvs'] == 1 else 's'}")
         if info["filter"]:
-            parts.append(f"filter: `{info['filter']}`")
-        st.markdown(f"- `{event['label']}` · " + " · ".join(parts))
+            parts.append(f"filter: {code(info['filter'])}")
+        st.markdown(f"- {code(event['label'])} · " + " · ".join(parts))
 
 
 def _agent(events: list[dict]) -> None:
     for event in events:
         if event["stage"] == "agent_model":
-            st.markdown(f"- **{event['label']}** · {fmt(event['ms'])} · " + (event["info"].get("decision") or event["info"].get("error", "")))
+            st.markdown(f"- **{esc(event['label'])}** · {fmt(event['ms'])} · " + esc(event["info"].get("decision") or event["info"].get("error", "")))
         elif event["stage"] == "tool":
-            st.markdown(f"  - tool `{event['label']}`" + (f" on {event['info']['cv']}" if event["info"].get("cv") else "") + f" · {fmt(event['ms'])}")
+            st.markdown(f"  - tool {code(event['label'])}" + (f" on {esc(event['info']['cv'])}" if event["info"].get("cv") else "") + f" · {fmt(event['ms'])}")
         elif event["stage"] == "search":
-            st.markdown(f"  - search `{event['label']}` · {event['info']['results']} chunks · {fmt(event['ms'])}" + (" · cached" if event["info"]["cached"] else ""))
+            st.markdown(f"  - search {code(event['label'])} · {event['info']['results']} chunks · {fmt(event['ms'])}" + (" · cached" if event["info"]["cached"] else ""))
 
 
 def _excerpts(sources: list[dict]) -> None:
@@ -144,14 +160,14 @@ def _excerpts(sources: list[dict]) -> None:
     st.caption(f"{len(sources)} excerpt{'' if len(sources) == 1 else 's'} from {len(files)} CV{'' if len(files) == 1 else 's'} went to the model.")
     for s in sources:
         page = f" · p.{s['page']}" if s.get("page") else ""
-        who = f" · {s['candidate_name']}" if s.get("candidate_name") else ""
-        st.markdown(f"- **{s['file_name']}**{who} · {s['section']}{page}")
+        who = f" · {esc(s['candidate_name'])}" if s.get("candidate_name") else ""
+        st.markdown(f"- **{esc(s['file_name'])}**{who} · {esc(s['section'])}{page}")
 
 
 def _settings(trace: dict) -> None:
     settings, models = trace["settings"], trace["models"]
     st.markdown(
-        f"- Chat model deployment: `{models['chat']}`\n- Embedding deployment: `{models['embedding']}`\n"
+        f"- Chat model deployment: {code(models['chat'])}\n- Embedding deployment: {code(models['embedding'])}\n"
         f"- Query expansion: {'on' if settings['query_expansion'] else 'off'}\n"
         f"- Answer cache: {'on' if settings['answer_cache'] else 'off'}"
     )
