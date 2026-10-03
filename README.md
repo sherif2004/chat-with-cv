@@ -25,14 +25,17 @@ One failing file (for example, a scanned PDF with no text) never stops the other
 ## Project structure
 
 ```
+app.py              # Streamlit entry point
+.streamlit/         # dark theme
 cv_chat/
 ├── config.py       # the only place that reads .env
 ├── services/       # one thin module per Azure service
 ├── processing/     # text extraction and chunking (pure Python, no Azure)
-└── rag/            # pipelines that combine services and processing
+├── rag/            # pipelines that combine services and processing
+└── ui/             # Streamlit sidebar and chat
 ```
 
-Imports flow one way: `rag` → `services` / `processing` → `config`.
+Imports flow one way: `app.py` → `ui` → `rag` → `services` / `processing` → `config`.
 
 ## Setup
 
@@ -49,7 +52,23 @@ cp .env.example .env    # then fill in your Azure values
 
 The Blob container and the search index are created automatically on the first ingestion.
 
-## Try ingestion
+## Run the app
+
+```bash
+uv run streamlit run app.py
+```
+
+1. In the sidebar, upload at least 8 CVs (PDF or DOCX) and click **Process CVs**. Each file reports its result as soon as it finishes.
+2. Ask a question in the chat, or pick one of the suggested questions.
+3. Open **Sources** under an answer to see which CVs it was based on.
+
+Indexed CVs stay in Azure, so they are still there after a restart. **New chat** clears the conversation only.
+
+## Command-line checks
+
+These run the pipelines without the UI.
+
+### Ingestion
 
 Put some CVs in a local `cvs/` folder (it is git-ignored), then run:
 
@@ -59,7 +78,7 @@ uv run python -c "from pathlib import Path; from cv_chat.rag.ingest import proce
 
 Each CV prints its chunk count, or the error that stopped it.
 
-## Try a question
+### Question answering
 
 ```bash
 uv run python -c "from cv_chat.rag.qa import ask; print(ask('Which candidates know Python?', [])[0])"
