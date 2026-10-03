@@ -1,0 +1,39 @@
+/* Styles only the app's own hero markup (ui/chat.py).
+   Streamlit's widgets are themed through .streamlit/config.toml. */
+
+.cv-hero {
+  padding: 2.5rem 0 1.75rem;
+  text-align: center;
+}
+
+.cv-hero-eyebrow {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  border: 1px solid rgba(124, 108, 246, 0.35);
+  border-radius: 999px;
+  background: rgba(124, 108, 246, 0.12);
+  color: #c4b5fd;
+  font-size: 0.8rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.cv-hero-title {
+  margin-top: 1rem;
+  font-size: 2.75rem;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.03em;
+  background: linear-gradient(90deg, #a5b4fc 0%, #8b7cf6 50%, #f0abfc 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.cv-hero-subtitle {
+  max-width: 32rem;
+  margin: 0.75rem auto 0;
+  color: #94a3b8;
+  font-size: 1.05rem;
+  line-height: 1.6;
+}
