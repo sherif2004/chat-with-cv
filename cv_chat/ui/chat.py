@@ -6,6 +6,11 @@ import streamlit as st
 from cv_chat import config
 from cv_chat.rag import qa
 
+ROUTE_NOTES = {
+    "chat": "Answered without searching the CVs",
+    "simple": "Simple question · one search",
+    "complex": "Complex question · answered by the search agent",
+}
 AVATARS = {"user": ":material/person:", "assistant": ":material/auto_awesome:"}
 SUGGESTIONS = [
     "Who has strong Python experience?",
@@ -58,6 +63,7 @@ def _suggest(question: str) -> None:
 def _show(message: dict) -> None:
     with st.chat_message(message["role"], avatar=AVATARS[message["role"]]):
         st.markdown(message["content"])
+        _route_note(message.get("route"))
         _sources(message.get("sources", []))
 
 
@@ -67,7 +73,7 @@ def _answer(question: str) -> None:
     with st.chat_message("assistant", avatar=AVATARS["assistant"]):
         try:
             with st.status("Reading your question...", expanded=True) as status:
-                stream, sources = qa.ask(
+                stream, sources, route = qa.ask(
                     question, history, expand=st.session_state.get("expand_queries", False),
                     cache_answers=st.session_state.get("cache_answers", False), on_step=st.write
                 )
@@ -76,11 +82,17 @@ def _answer(question: str) -> None:
         except Exception as error:
             st.error(f"Could not answer: {str(error).splitlines()[0]}", icon=":material/error:")
             return
+        _route_note(route)
         _sources(sources)
     st.session_state.messages += [
         {"role": "user", "content": question},
-        {"role": "assistant", "content": answer, "sources": sources},
+        {"role": "assistant", "content": answer, "sources": sources, "route": route},
     ]
+
+
+def _route_note(route: str | None) -> None:
+    if route in ROUTE_NOTES:
+        st.caption(ROUTE_NOTES[route], icon=":material/alt_route:")
 
 
 def _sources(sources: list[dict]) -> None:

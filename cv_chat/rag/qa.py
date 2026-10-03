@@ -3,6 +3,7 @@ import json
 import logging
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from cv_chat import config
 from cv_chat.processing.sections import SECTION_TYPES
@@ -42,6 +43,12 @@ with exactly {config.EXPANDED_QUERIES} alternative queries that look for the sam
 Keep every name and number from the query. Do not add requirements the query does not have."""
 
 ROUTES = ("chat", "simple", "complex")
+
+
+class Answer(NamedTuple):
+    stream: Iterator[str]  # the answer text, piece by piece
+    sources: list[dict]
+    route: str  # how the question was handled: one of ROUTES
 
 
 @dataclass(frozen=True)
@@ -91,13 +98,13 @@ def _expand(query: str) -> list[str]:
     return [q for q in dict.fromkeys(alternatives) if q != query][: config.EXPANDED_QUERIES]
 
 
-def _remember(stream: Iterator[str], sources: list[dict], key: tuple, token: int) -> Iterator[str]:
+def _remember(stream: Iterator[str], sources: list[dict], route: str, key: tuple, token: int) -> Iterator[str]:
     """Pass the answer through and store it once it has been written completely."""
     pieces = []
     for piece in stream:
         pieces.append(piece)
         yield piece
-    cache.put(ANSWER, key, ("".join(pieces), sources), token)
+    cache.put(ANSWER, key, ("".join(pieces), sources, route), token)
 
 
 def ask(
@@ -106,8 +113,8 @@ def ask(
     expand: bool = False,
     cache_answers: bool = False,
     on_step: Callable[[str], None] = lambda step: None,
-) -> tuple[Iterator[str], list[dict]]:
-    """Find the relevant CV chunks and start the answer. Returns (answer text as a stream, sources).
+) -> Answer:
+    """Find the relevant CV chunks and start the answer. Returns the answer as a stream, its sources and its route.
 
     expand=True also searches reworded queries. cache_answers=True reuses the answer to an identical question with an
     identical chat. on_step is told each step as it starts (routing decision, searches, agent tool calls).
@@ -117,22 +124,23 @@ def ask(
         return _answer(question, history, expand, on_step)
     key = (question, tuple((m["role"], m["content"]) for m in _recent(history)), expand)
     if (cached := cache.get(ANSWER, key)) is not None:
-        return iter([cached[0]]), cached[1]
+        return Answer(iter([cached[0]]), cached[1], cached[2])
     token = cache.token()
-    stream, sources = _answer(question, history, expand, on_step)
-    return _remember(stream, sources, key, token), sources
+    stream, sources, route = _answer(question, history, expand, on_step)
+    return Answer(_remember(stream, sources, route, key, token), sources, route)
 
 
-def _answer(question: str, history: list[dict], expand: bool, on_step: Callable[[str], None]) -> tuple[Iterator[str], list[dict]]:
+def _answer(question: str, history: list[dict], expand: bool, on_step: Callable[[str], None]) -> Answer:
     route = _route(question, history)
+    log.info("route=%s query=%r sections=%s", route.kind, route.query, route.sections)
     if route.kind == "chat":  # no search, no sources
         on_step("Chat message, no search needed")
         messages = [{"role": "system", "content": CHAT_PROMPT}, *_recent(history), {"role": "user", "content": question}]
-        return openai_service.chat_stream(messages), []
+        return Answer(openai_service.chat_stream(messages), [], "chat")
     if route.kind == "complex":  # needs more than the best chunks: let the agent plan its own searches
         on_step("Complex question: planning the searches")
         try:
-            return agent.run(route.query, _recent(history), on_step)
+            return Answer(*agent.run(route.query, _recent(history), on_step), "complex")
         except Exception as error:  # fall back to the plain flow rather than lose the answer
             log.warning("agent failed, using a single search: %s", error)
     if expand:
@@ -146,4 +154,4 @@ def _answer(question: str, history: list[dict], expand: bool, on_step: Callable[
         *_recent(history),
         {"role": "user", "content": f"CV excerpts:\n\n{excerpts}\n\nQuestion: {question}"},
     ]
-    return openai_service.chat_stream(messages), sources
+    return Answer(openai_service.chat_stream(messages), sources, "simple")
