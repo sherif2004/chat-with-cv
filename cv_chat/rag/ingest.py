@@ -5,7 +5,7 @@ CVs are processed in parallel threads: the work is I/O-bound (HTTP calls to Azur
 import hashlib
 from functools import lru_cache
 from pathlib import Path
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from cv_chat import config
@@ -30,18 +30,25 @@ def file_id_for(file_name: str) -> str:
     return hashlib.md5(file_name.encode()).hexdigest()
 
 
-def process_cv(file_name: str, data: bytes, force: bool = False) -> tuple[int, bool]:
-    """Index one CV and store the original file. Returns (chunks, skipped); skipped means it was already indexed."""
+def process_cv(
+    file_name: str, data: bytes, force: bool = False, on_stage: Callable[[str], None] = lambda stage: None
+) -> tuple[int, bool]:
+    """Index one CV and store the original file. Returns (chunks, skipped); skipped means it was already indexed.
+
+    on_stage is told what the CV is doing, for the live status in the sidebar.
+    """
     file_id = file_id_for(file_name)
     content_hash = hashlib.md5(data + _pipeline_fingerprint()).hexdigest()
     if not force and search_index.get_hash(file_id) == content_hash:
         return 0, True
 
+    on_stage("reading layout")
     document = extract_cv(file_name, data)
     if not any(text.strip() for _, text in document.pages):
         raise ValueError("No text found (scanned PDF?)")
 
     chunks = chunk_cv(document.pages, document.headers, config.CHUNK_SIZE, config.CHUNK_OVERLAP)
+    on_stage("embedding")
     # Embed each chunk together with its file name, so chunks from later pages still point to the candidate.
     vectors = openai_service.embed([f"CV: {file_name}\n{chunk.text}" for chunk in chunks])
 
@@ -53,6 +60,7 @@ def process_cv(file_name: str, data: bytes, force: bool = False) -> tuple[int, b
         }
         for i, (chunk, vector) in enumerate(zip(chunks, vectors))
     ]
+    on_stage("saving")
     search_index.upload_chunks(docs)  # upload first, then drop leftovers, so the CV is never missing from the index
     search_index.delete_stale_chunks(file_id, {doc["id"] for doc in docs})
     blob_storage.upload_file(file_name, data)
@@ -63,12 +71,6 @@ def delete_cv(file_name: str) -> None:
     """Remove a CV everywhere. The index goes first: a CV left in the index but not in storage would still be quoted."""
     search_index.delete_file_chunks(file_id_for(file_name))
     blob_storage.delete_file(file_name)
-
-
-def reindex_cv(file_name: str) -> int:
-    """Process a stored CV again from its original file (for example after the pipeline changed). Returns the chunks."""
-    chunks, _ = process_cv(file_name, blob_storage.download_file(file_name), force=True)
-    return chunks
 
 
 def prepare() -> None:

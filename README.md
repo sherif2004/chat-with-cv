@@ -74,7 +74,7 @@ flowchart LR
 6. **Save to Azure AI Search.** The new chunks are uploaded first, then chunks the new version no longer has are deleted, so a CV is never missing from the index.
 7. **Save the original** to Azure Blob Storage.
 
-Several CVs are processed in parallel (4 at a time). Docling runs one conversion at a time (its models are not thread-safe), but other CVs can embed and upload while one is being read. One CV failing, for example a scanned PDF with no text, never stops the others.
+Several CVs are processed in parallel (4 at a time) by a background queue, and the sidebar shows each file's state live. Docling runs one conversion at a time (its models are not thread-safe), but other CVs can embed and upload while one is being read. One CV failing, for example a scanned PDF with no text, never stops the others.
 
 ### 2. Answering a question (every time you ask)
 
@@ -164,11 +164,11 @@ The browser opens automatically. The Blob container and the search index are cre
 ## Using the app
 
 1. **Upload.** In the sidebar, drop CVs (PDF or DOCX) into the upload box. **Process CVs** stays disabled until the knowledge base would hold at least 8 CVs (the ones already indexed plus the new files), and the chat stays disabled while there are fewer than 8.
-2. **Process.** Click **Process CVs**. Each file gets a green check and its chunk count as soon as it finishes, a grey check if it was already indexed and unchanged, or a red mark and the reason if it failed. A progress bar tracks the whole batch.
+2. **Process.** Click **Process CVs**. The files are processed in the background, 4 at a time, and a live status list in the sidebar refreshes every 2 seconds. Each file shows *waiting*, then the stage it is in (*reading layout*, *embedding*, *saving*), then a green check with its chunk count, a grey check if it was already indexed and unchanged, or a red mark and the reason if it failed. A progress bar and a line such as "4 running in parallel · 3 waiting" show the whole batch. You can keep using the app while it runs; when the last file finishes the CV list updates by itself. **Clear status** removes the finished entries.
 3. **Ask.** Type a question, or click one of the suggested questions on the welcome screen. The answer streams in as it is written.
 4. **Check the sources.** Open **Sources** under an answer to see which CVs it used and the most relevant passage of each.
 5. **Manage a CV.** Open **Manage a CV** in the sidebar, pick a CV, then:
-   - **Re-index** processes the stored file again (for example after the pipeline changed),
+   - **Re-index** queues the stored file for processing again (for example after the pipeline changed) and shows it in the same status list,
    - **Delete** removes it from Blob Storage and from search, after a confirmation. If this leaves fewer than 8 CVs, the chat is disabled until you add more.
 6. **Start over.** **New chat** clears the conversation. It does not delete any CVs.
 
@@ -197,7 +197,8 @@ chat-with-cv/
     │   ├── chunking.py           # pages to section-based chunks
     │   └── sections.py           # heading to standard section type
     ├── rag/                  # the two pipelines
-    │   ├── ingest.py             # upload flow: skip check, extract, chunk, embed, save; delete and re-index
+    │   ├── ingest.py             # upload flow: skip check, extract, chunk, embed, save; delete
+    │   ├── jobs.py               # background queue: runs CVs in parallel and tracks each file's state
     │   └── qa.py                 # question flow: rewrite, search, spread over CVs, stream answer
     └── ui/                   # Streamlit screens
         ├── sidebar.py            # upload, process, list of CVs

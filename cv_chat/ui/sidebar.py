@@ -1,8 +1,8 @@
-"""Sidebar: the CV knowledge base. Upload CVs, process them in parallel, list, re-index and delete them."""
+"""Sidebar: the CV knowledge base. Upload CVs, watch them being processed in parallel, list, re-index and delete them."""
 import streamlit as st
 
 from cv_chat import config
-from cv_chat.rag import ingest
+from cv_chat.rag import ingest, jobs
 
 
 def render() -> list[str]:
@@ -22,8 +22,8 @@ def render() -> list[str]:
         if files and not enough:
             st.warning(f"{total} of {config.MIN_CVS} CVs. Add {config.MIN_CVS - total} more to continue.", icon=":material/info:")
         if st.button("Process CVs", icon=":material/bolt:", type="primary", disabled=not files or not enough, width="stretch"):
-            _process(files)
-            cvs = _list_cvs(show_error=False)
+            _start([(f.name, f.getvalue()) for f in files])
+        _status_panel()
 
         _show(cvs)
         if cvs:
@@ -34,30 +34,56 @@ def render() -> list[str]:
     return cvs
 
 
-def _process(files) -> None:
-    """Process the uploaded files in parallel, showing each result as soon as its file finishes."""
-    total = len(files)
-    failed = 0
-    with st.status(f"Processing {total} CVs", expanded=True) as status:
-        progress = st.progress(0.0, text=f"0 of {total} done")
-        try:
-            for done, result in enumerate(ingest.process_cvs([(f.name, f.getvalue()) for f in files]), start=1):
-                if result["error"]:
-                    failed += 1
-                    st.markdown(f":red[:material/error:] **{result['file']}**")
-                    st.caption(result["error"].splitlines()[0][:200])
-                elif result["skipped"]:
-                    st.markdown(f":gray[:material/check_circle:] **{result['file']}** · already indexed, unchanged")
-                else:
-                    st.markdown(f":green[:material/check_circle:] **{result['file']}** · {result['chunks']} chunks")
-                progress.progress(done / total, text=f"{done} of {total} done")
-        except Exception as error:  # setup failed before any file ran (for example a wrong key)
-            status.update(label="Processing failed", state="error")
-            st.error(str(error).splitlines()[0], icon=":material/error:")
-            return
-        summary = f"Indexed {total - failed} of {total} CVs"
-        status.update(label=summary, state="error" if failed else "complete", expanded=bool(failed))
-    st.toast(summary, icon=":material/warning:" if failed else ":material/task_alt:")
+def _start(files: list[tuple[str, bytes]]) -> None:
+    """Queue the files. They are processed in the background, several at a time, and show up in the status panel."""
+    try:
+        jobs.queue.submit(files)
+    except Exception as error:  # setup failed before any file ran (for example a wrong key)
+        st.error(str(error).splitlines()[0], icon=":material/error:")
+
+
+@st.fragment(run_every=2)
+def _status_panel() -> None:
+    """Live state of every file, refreshed every 2 seconds. When the last file finishes, the whole app reruns once."""
+    snapshot = jobs.queue.snapshot()
+    if snapshot:
+        finished = [job for job in snapshot if job.state in jobs.FINISHED]
+        running = sum(job.state == "processing" for job in snapshot)
+        waiting = sum(job.state == "queued" for job in snapshot)
+        st.progress(len(finished) / len(snapshot), text=f"{len(finished)} of {len(snapshot)} done")
+        if len(finished) < len(snapshot):
+            st.caption(f"{running} running in parallel · {waiting} waiting")
+        with st.container(border=True):
+            for job in snapshot:
+                _show_job(job)
+        if len(finished) == len(snapshot):
+            st.button("Clear status", icon=":material/close:", on_click=jobs.queue.clear_finished, width="stretch")
+
+    active = jobs.queue.active()
+    if st.session_state.get("ingest_was_active") and not active:
+        failed = sum(job.state == "failed" for job in snapshot)
+        st.session_state.notice = (
+            (f"{failed} of {len(snapshot)} CVs failed", ":material/warning:")
+            if failed
+            else (f"Processed {len(snapshot)} CVs", ":material/task_alt:")
+        )
+        st.session_state.ingest_was_active = False
+        st.rerun()  # refresh the list of indexed CVs and enable the chat
+    st.session_state.ingest_was_active = active
+
+
+def _show_job(job: jobs.Job) -> None:
+    if job.state == "queued":
+        st.markdown(f":gray[:material/schedule:] **{job.file_name}** · waiting")
+    elif job.state == "processing":
+        st.markdown(f":blue[:material/sync:] **{job.file_name}** · {job.stage}")
+    elif job.state == "indexed":
+        st.markdown(f":green[:material/check_circle:] **{job.file_name}** · {job.chunks} chunks")
+    elif job.state == "skipped":
+        st.markdown(f":gray[:material/check_circle:] **{job.file_name}** · already indexed, unchanged")
+    else:
+        st.markdown(f":red[:material/error:] **{job.file_name}**")
+        st.caption((job.error.splitlines() or ["Failed"])[0][:200])
 
 
 def _list_cvs(show_error: bool = True) -> list[str]:
@@ -95,9 +121,9 @@ def _manage(cvs: list[str]) -> None:
 
 
 def _reindex(name: str) -> None:
+    """Queue the stored original for processing again; the status panel shows its progress."""
     try:
-        chunks = ingest.reindex_cv(name)
-        st.session_state.notice = (f"Re-indexed {name} · {chunks} chunks", ":material/task_alt:")
+        jobs.queue.submit([(name, None)], force=True)
     except Exception as error:
         st.session_state.notice = (f"Could not re-index {name}: {str(error).splitlines()[0][:150]}", ":material/error:")
 
@@ -105,6 +131,7 @@ def _reindex(name: str) -> None:
 def _delete(name: str) -> None:
     try:
         ingest.delete_cv(name)
+        jobs.queue.forget(name)
         st.session_state.notice = (f"Deleted {name}", ":material/task_alt:")
     except Exception as error:
         st.session_state.notice = (f"Could not delete {name}: {str(error).splitlines()[0][:150]}", ":material/error:")
