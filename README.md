@@ -80,7 +80,7 @@ Several CVs are processed in parallel (4 at a time) by a background queue, and t
 
 ```mermaid
 flowchart LR
-    Q["Your question<br/>+ recent chat"] --> W["Rewrite question<br/>pick CV sections"]
+    Q["Your question<br/>+ recent chat"] --> W["Route and rewrite<br/>pick CV sections"]
     W --> E["Embed the query"]
     E --> S[("Azure AI Search<br/>hybrid search + semantic ranker")]
     S --> T["Max 2 chunks per CV<br/>top 10 overall"]
@@ -88,7 +88,7 @@ flowchart LR
     M --> R["Answer + Sources"]
 ```
 
-1. **Rewrite the question.** One quick model call turns a follow-up like "what about his education?" into a standalone search query using the recent chat, and picks which CV sections hold the answer (for example `education`). If this step fails, the original question is used.
+1. **Route and rewrite the question.** One quick model call decides whether the message needs a search at all (greetings and thanks do not), turns a follow-up like "what about his education?" into a standalone search query using the recent chat, and picks which CV sections hold the answer (for example `education`). If this step fails, the original question is searched as it is. Answers cite their evidence as `[file name, p.N]`.
 2. **Embed the query** the same way as the chunks. Embeddings of repeated queries are cached in memory.
 3. **Hybrid search, filtered by section.** Azure AI Search runs two searches in one query and merges the rankings:
    - *keyword search* finds exact words, such as a skill, tool or name,
@@ -199,7 +199,7 @@ chat-with-cv/
     ├── rag/                  # the two pipelines
     │   ├── ingest.py             # upload flow: skip check, extract, chunk, embed, save; delete
     │   ├── jobs.py               # background queue: runs CVs in parallel and tracks each file's state
-    │   └── qa.py                 # question flow: rewrite, search, spread over CVs, stream answer
+    │   └── qa.py                 # question flow: route, search, spread over CVs, stream answer
     └── ui/                   # Streamlit screens
         ├── sidebar.py            # upload, process, list of CVs
         ├── chat.py               # conversation and sources
@@ -242,7 +242,7 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 | `MAX_CHUNKS_PER_CV` | `2` | Most chunks one CV can contribute to an answer |
 | `TOP_K` | `10` | Chunks sent to the chat model for each question |
 | `MIN_FILTERED_RESULTS` | `3` | Fewer section-filtered hits than this and the search runs again on all sections |
-| `HISTORY_MESSAGES` | `6` | Recent chat messages used for the rewrite and sent with each question |
+| `HISTORY_MESSAGES` | `6` | Recent chat messages used for the router and sent with each question |
 | `EMBED_CACHE_SIZE` | `256` | Query embeddings kept in memory |
 
 ---
@@ -257,7 +257,7 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 - **Delete is permanent.** It removes the original file from Blob Storage and the CV from the index.
 - **Scanned PDFs go through OCR**, which is slower than reading a text PDF. A PDF with no readable text at all is reported as "No text found".
 - **DOCX files have no page numbers**, so their chunks are stored as page 1.
-- **Each question makes an extra model call** (the rewrite), which adds a little time before the answer starts streaming.
+- **Each question makes an extra model call** (the router), which adds a little time before the answer starts streaming.
 - **Broad questions** reach at most 10 chunks, 2 per CV, so a question about a large pile of CVs may not cover every one.
 - **The embedding size is read from your embedding model** when the index is first created, and cannot be changed on an existing index. To switch to a model with a different size, delete the index in the Azure portal (or set a new `AZURE_SEARCH_INDEX` name) and process the CVs again.
 - **Restart Streamlit after editing `.env`.** The file is read once at startup.
@@ -266,9 +266,9 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 
 ## Roadmap
 
-Planned improvements to the chat side, in the order they are meant to be built. **None of these exist yet**; the sections above describe what the app does today.
+Improvements to the chat side, in the order they are built. Steps marked *done* are already described in the sections above.
 
-### 1. Router and inline citations
+### 1. Router and inline citations (done)
 
 - **Router.** One model call classifies each message as *chat* (greetings, thanks, off-topic: no search), *simple* (one search) or *complex* (see step 3), and rewrites it into a standalone question. It replaces today's rewrite step, so it adds no extra call.
 - **Inline citations.** Answers cite their evidence as `[file name, p.N]` next to each claim, using the page number that is already stored with every chunk. When comparing candidates, each gets their own heading.
