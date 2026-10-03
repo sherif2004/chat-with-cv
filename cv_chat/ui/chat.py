@@ -67,7 +67,7 @@ def _answer(question: str) -> None:
     with st.chat_message("assistant", avatar=AVATARS["assistant"]):
         try:
             with st.spinner("Searching the CVs..."):
-                stream, sources = qa.ask(question, history)
+                stream, sources = qa.ask(question, history, expand=st.session_state.get("expand_queries", False))
             answer = st.write_stream(stream)
         except Exception as error:
             st.error(f"Could not answer: {str(error).splitlines()[0]}", icon=":material/error:")

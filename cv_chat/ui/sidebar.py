@@ -29,6 +29,11 @@ def render() -> list[str]:
         if cvs:
             _manage(cvs)
 
+        st.toggle(
+            "Query expansion", key="expand_queries",
+            help="Also search two reworded versions of each question and merge the results. "
+            "Finds more, but answers start 1 to 2 seconds later and each question uses three semantic searches.",
+        )
         if st.button("New chat", icon=":material/add_comment:", width="stretch"):
             st.session_state.messages = []
     return cvs

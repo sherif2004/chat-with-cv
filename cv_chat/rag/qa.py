@@ -1,13 +1,12 @@
 """Question answering over the indexed CVs: route the question, retrieve the best chunks, stream the answer."""
 import json
-from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass
-from functools import lru_cache
 
 from cv_chat import config
 from cv_chat.processing.sections import SECTION_TYPES
-from cv_chat.services import openai_service, search_index
+from cv_chat.rag import retrieval
+from cv_chat.services import openai_service
 
 SYSTEM_PROMPT = """You answer questions about a set of candidate CVs.
 Use only the CV excerpts in the user's message. Each excerpt starts with a header like [CV: file name · section · p.N].
@@ -32,6 +31,12 @@ Given the chat so far and the latest message, reply with JSON: {{"route": "...",
 - "sections": the CV sections that hold the answer, chosen only from {SECTION_TYPES}.
   Use [] when the question is about the whole CV or you are unsure."""
 
+EXPAND_PROMPT = f"""You help search a set of candidate CVs. Given a search query, reply with JSON: {{"queries": ["...", "..."]}}
+with exactly {config.EXPANDED_QUERIES} alternative queries that look for the same thing:
+1. keywords only: the key skills, job titles, technologies and names, no filler words;
+2. worded the way a CV would say it (for "built APIs" write "designed and developed REST services").
+Keep every name and number from the query. Do not add requirements the query does not have."""
+
 ROUTES = ("chat", "simple", "complex")
 
 
@@ -40,12 +45,6 @@ class Route:
     kind: str  # one of ROUTES
     query: str  # the message rewritten to stand alone
     sections: list[str]
-
-
-@lru_cache(maxsize=config.EMBED_CACHE_SIZE)
-def embed_question(question: str) -> tuple[float, ...]:
-    """Cached in memory: asking the same question again skips the embedding call."""
-    return tuple(openai_service.embed([question])[0])
 
 
 def _route(question: str, history: list[dict]) -> Route:
@@ -70,25 +69,16 @@ def _recent(history: list[dict]) -> list[dict]:
     return [{"role": m["role"], "content": m["content"]} for m in history[-config.HISTORY_MESSAGES :]]
 
 
-def _retrieve(query: str, sections: list[str]) -> list[dict]:
-    vector = list(embed_question(query))
-    results = search_index.hybrid_search(query, vector, config.RETRIEVE_K, sections)
-    if sections and len(results) < config.MIN_FILTERED_RESULTS:  # the CVs may use unusual headings: search everything
-        results = search_index.hybrid_search(query, vector, config.RETRIEVE_K)
-    return _spread_over_cvs(results)
-
-
-def _spread_over_cvs(results: list[dict]) -> list[dict]:
-    """Keep the ranking but allow each CV only a few chunks, so broad questions reach many CVs."""
-    per_cv: Counter[str] = Counter()
-    picked = []
-    for result in results:
-        if per_cv[result["file_name"]] < config.MAX_CHUNKS_PER_CV:
-            per_cv[result["file_name"]] += 1
-            picked.append(result)
-        if len(picked) == config.TOP_K:
-            break
-    return picked
+def _expand(query: str) -> list[str]:
+    """Two alternative search queries (keyword style, and worded the way a CV would say it). [] if the call fails."""
+    try:
+        data = json.loads(openai_service.chat(
+            [{"role": "system", "content": EXPAND_PROMPT}, {"role": "user", "content": query}], json_mode=True
+        ))
+        alternatives = [str(q).strip() for q in data.get("queries", []) if str(q).strip()]
+    except Exception:  # expansion only widens the search, so a failure must never block the answer
+        return []
+    return [q for q in dict.fromkeys(alternatives) if q != query][: config.EXPANDED_QUERIES]
 
 
 def _excerpt(source: dict) -> str:
@@ -96,14 +86,15 @@ def _excerpt(source: dict) -> str:
     return f"[CV: {source['file_name']} · {where}]\n{source['content']}"
 
 
-def ask(question: str, history: list[dict]) -> tuple[Iterator[str], list[dict]]:
-    """Find the relevant CV chunks and start the answer. Returns (answer text as a stream, sources)."""
+def ask(question: str, history: list[dict], expand: bool = False) -> tuple[Iterator[str], list[dict]]:
+    """Find the relevant CV chunks and start the answer. expand=True also searches reworded queries. Returns (answer text as a stream, sources)."""
     question = question.strip()
     route = _route(question, history)
     if route.kind == "chat":  # no search, no sources
         messages = [{"role": "system", "content": CHAT_PROMPT}, *_recent(history), {"role": "user", "content": question}]
         return openai_service.chat_stream(messages), []
-    sources = _retrieve(route.query, route.sections)
+    queries = [route.query, *(_expand(route.query) if expand else [])]
+    sources = retrieval.retrieve(queries, route.sections)
     excerpts = "\n\n".join(_excerpt(s) for s in sources)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},

@@ -199,7 +199,8 @@ chat-with-cv/
     ├── rag/                  # the two pipelines
     │   ├── ingest.py             # upload flow: skip check, extract, chunk, embed, save; delete
     │   ├── jobs.py               # background queue: runs CVs in parallel and tracks each file's state
-    │   └── qa.py                 # question flow: route, search, spread over CVs, stream answer
+    │   ├── qa.py                 # question flow: route, expand, search, stream answer
+    │   └── retrieval.py          # embed, hybrid search, rank fusion, spread over CVs
     └── ui/                   # Streamlit screens
         ├── sidebar.py            # upload, process, list of CVs
         ├── chat.py               # conversation and sources
@@ -240,6 +241,8 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 | `EXTRACT_CACHE_DIR` | `.cache/extracted` | Where Docling output is saved |
 | `RETRIEVE_K` | `30` | Candidates fetched and re-ranked per question |
 | `MAX_CHUNKS_PER_CV` | `2` | Most chunks one CV can contribute to an answer |
+| `EXPANDED_QUERIES` | `2` | Alternative queries searched when **Query expansion** is on |
+| `RRF_K` | `60` | Reciprocal rank fusion constant used to merge the searches |
 | `TOP_K` | `10` | Chunks sent to the chat model for each question |
 | `MIN_FILTERED_RESULTS` | `3` | Fewer section-filtered hits than this and the search runs again on all sections |
 | `HISTORY_MESSAGES` | `6` | Recent chat messages used for the router and sent with each question |
@@ -275,7 +278,7 @@ Improvements to the chat side, in the order they are built. Steps marked *done* 
 - *Why:* no wasted searches on "hi" or "thanks", and every claim can be traced to a CV and page.
 - *Cost:* very low.
 
-### 2. Query expansion with rank fusion
+### 2. Query expansion with rank fusion (done)
 
 - The question is expanded into two alternative search queries (one keyword-style, one worded the way a CV would say it). Each query runs the usual hybrid search with semantic re-ranking, and the result lists are merged with reciprocal rank fusion, so a chunk found by several queries rises to the top.
 - A sidebar toggle turns it on and off.
