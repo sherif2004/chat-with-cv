@@ -77,5 +77,7 @@ def format_excerpt(chunk: dict) -> str:
     the block early and pass its own text off as instructions.
     """
     where = f"{chunk['section']} · p.{chunk['page']}" if chunk.get("page") else chunk["section"]
-    text = _TAG.sub("", f"[CV: {chunk['file_name']} · {where}]\n{chunk['content']}")
+    text = f"[CV: {chunk['file_name']} · {where}]\n{chunk['content']}"
+    while (stripped := _TAG.sub("", text)) != text:  # repeat: removing a tag can join the pieces around it into a new one
+        text = stripped
     return f"<cv_excerpt>\n{text}\n</cv_excerpt>"
