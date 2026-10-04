@@ -20,6 +20,13 @@ def upload_file(name: str, data: bytes) -> None:
     _container.upload_blob(name, data, overwrite=True)
 
 
+def download_file(name: str) -> bytes | None:
+    try:
+        return _container.download_blob(name).readall()
+    except ResourceNotFoundError:  # deleted from storage: no longer one of the uploaded CVs
+        return None
+
+
 def list_files() -> list[str]:
     try:
         return sorted(blob.name for blob in _container.list_blobs())
