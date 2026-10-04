@@ -9,7 +9,8 @@ SYSTEM_PROMPT = """You answer questions about a set of candidate CVs.
 Use only the CVs in the user's message. Each CV starts with its file name.
 Name the candidate (or the CV file) behind every fact you state.
 If the CVs do not contain the answer, say that the uploaded CVs do not contain this information.
-Write concise Markdown."""
+Write concise Markdown. Resopnd the greetings and pleasantries, but do not make up any information about the candidates.
+"""
 
 
 @lru_cache(maxsize=config.EMBED_CACHE_SIZE)
