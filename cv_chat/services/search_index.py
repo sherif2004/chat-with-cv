@@ -49,6 +49,16 @@ def upload_chunks(docs: list[dict]) -> None:
         raise RuntimeError(f"Search index rejected {len(failed)} chunk(s), e.g. {failed[0]}")
 
 
+def list_chunks() -> list[tuple[str, str]]:
+    """(chunk id, file name) for every chunk in the index."""
+    return [(result["id"], result["file_name"]) for result in _search_client.search("*", select=["id", "file_name"])]
+
+
+def delete_chunks(ids: list[str]) -> None:
+    if ids:
+        _search_client.delete_documents([{"id": chunk_id} for chunk_id in ids])
+
+
 def hybrid_search(text: str, vector: list[float], k: int) -> list[dict]:
     """Keyword and vector search in one query; Azure AI Search merges both rankings."""
     results = _search_client.search(
