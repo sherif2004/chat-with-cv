@@ -77,8 +77,9 @@ Several CVs are processed in parallel (4 at a time). One CV failing, for example
 flowchart LR
     Q["Your question"] --> E["Embed the question"]
     E --> S[("Azure AI Search<br/>hybrid search")]
-    S --> T["Top 10 most<br/>relevant chunks"]
-    T --> M["Azure OpenAI chat model<br/>question + chunks + recent chat"]
+    S --> T["Up to 10 most<br/>relevant CVs"]
+    T --> B[("Azure Blob Storage<br/>full CV files")]
+    B --> M["Azure OpenAI chat model<br/>question + full CVs + recent chat"]
     M --> R["Answer + Sources"]
 ```
 
@@ -86,9 +87,10 @@ flowchart LR
 2. **Hybrid search.** Azure AI Search runs two searches in one query and merges the rankings:
    - *keyword search* finds exact words, such as a skill, tool or name,
    - *vector search* finds chunks with a similar meaning, even if the words differ ("cloud" finds "Azure").
-3. **Take the 10 best chunks.**
-4. **Ask the chat model.** It receives the chunks, the question and the last few chat messages, and is told to answer only from the chunks and to say so when the answer is not there.
-5. **Show the answer** with a **Sources** list of the CVs it came from.
+3. **Rank the CVs.** The 30 best chunks show which CVs are relevant, best first. Up to 10 of them are used.
+4. **Read those CVs in full.** Their original files are read from Blob Storage, so the model sees each candidate's whole CV, not just the pieces the search picked. This matters for questions like "who fits this job better?": a candidate is never judged on one random fragment.
+5. **Ask the chat model.** It receives the full CVs, the question and the last few chat messages, and is told to answer only from the CVs and to say so when the answer is not there.
+6. **Show the answer** with a **Sources** list of the CVs it read and the passages that matched the question.
 
 ### What happens when you open the app
 
@@ -184,7 +186,7 @@ chat-with-cv/
 └── cv_chat/
     ├── config.py             # reads .env and holds all settings
     ├── services/             # one small file per Azure service
-    │   ├── blob_storage.py       # store and list CV files
+    │   ├── blob_storage.py       # store, list and read CV files
     │   ├── search_index.py       # create the index, save chunks, search
     │   └── openai_service.py     # embeddings and chat answers
     ├── processing/           # plain Python, no Azure
@@ -192,7 +194,7 @@ chat-with-cv/
     │   └── chunking.py           # text to overlapping chunks
     ├── rag/                  # the two pipelines
     │   ├── ingest.py             # upload flow: extract, chunk, embed, save
-    │   └── qa.py                 # question flow: search, then answer
+    │   └── qa.py                 # question flow: rank CVs, read them in full, answer
     └── ui/                   # Streamlit screens
         ├── sidebar.py            # upload, process, list of CVs
         ├── chat.py               # conversation and sources
@@ -227,7 +229,8 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 | `CHUNK_SIZE` | `1500` | Characters per chunk |
 | `CHUNK_OVERLAP` | `300` | Characters shared between neighbouring chunks (20%) |
 | `MAX_WORKERS` | `4` | CVs processed at the same time. Lower it if Azure OpenAI reports rate limits |
-| `TOP_K` | `10` | Chunks retrieved for each question |
+| `TOP_K` | `30` | Chunks searched for each question, to rank the CVs |
+| `MAX_CVS` | `10` | Most CVs the model reads in full for each question |
 | `HISTORY_MESSAGES` | `6` | Recent chat messages sent along with each question |
 | `EMBED_CACHE_SIZE` | `256` | Question embeddings kept in memory |
 
@@ -237,9 +240,10 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 
 - **Uploading the same file again is safe.** Chunks are saved under a fixed ID built from the file name, so a second upload replaces the first instead of adding duplicates. The only cost is processing the file again.
 - **Same CV under a different file name counts as a different CV.** `cv.pdf` and `cv (1).pdf` are stored separately.
-- **If an edited CV got shorter**, the leftover chunks from the old version stay in the index and can still show up in answers. To clean up, delete the index in the Azure portal and process the CVs again.
+- **If an edited CV got shorter**, the leftover chunks from the old version stay in the index. They can still affect which CVs rank first, but the answer always uses the current file. To clean up, delete the index in the Azure portal and process the CVs again.
+- **A CV deleted from Blob Storage is ignored in answers**, even if its chunks are still in the index.
 - **Scanned PDFs are not supported.** A PDF that is only a picture has no text to read, so it is reported as "No text found". It would need OCR.
-- **Questions about everyone at once** are limited to the 10 best chunks, so a very broad question may not cover every CV.
+- **Each question reads up to 10 full CVs.** With more than 10 CVs uploaded, only the 10 that rank highest for the question are read, so a very broad question may not cover every CV.
 - **The embedding size cannot be changed on an existing index.** To switch embedding models, delete the index in the Azure portal (or set a new `AZURE_SEARCH_INDEX` name) and process the CVs again.
 - **Restart Streamlit after editing `.env`.** The file is read once at startup.
 
