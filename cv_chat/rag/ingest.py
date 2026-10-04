@@ -36,6 +36,7 @@ def process_cvs(files: list[tuple[str, bytes]]) -> Iterator[dict]:
     """Process (file_name, data) pairs in parallel and yield each file's result as soon as it finishes."""
     blob_storage.ensure_container()
     search_index.ensure_index()
+    remove_deleted_cvs()  # before any file runs: a file in progress is in the index before it reaches Blob Storage
     with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as pool:
         futures = {pool.submit(process_cv, name, data): name for name, data in files}
         for future in as_completed(futures):
@@ -44,6 +45,12 @@ def process_cvs(files: list[tuple[str, bytes]]) -> Iterator[dict]:
             except Exception as error:  # one bad file never stops the others
                 result = {"file": futures[future], "chunks": 0, "error": str(error)}
             yield result
+
+
+def remove_deleted_cvs() -> None:
+    """Delete the index chunks of CVs whose file is no longer in Blob Storage (for example deleted in the portal)."""
+    files = set(blob_storage.list_files())
+    search_index.delete_chunks([chunk_id for chunk_id, name in search_index.list_chunks() if name not in files])
 
 
 def list_cvs() -> list[str]:
