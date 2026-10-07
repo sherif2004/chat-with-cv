@@ -1,4 +1,4 @@
-"""Chat with CVs: Streamlit entry point. Run with `uv run streamlit run app.py`."""
+"""Chat with CVs: Streamlit entry point. Run with `streamlit run app.py`."""
 import streamlit as st
 
 st.set_page_config(page_title="CV Chat", page_icon=":material/description:")

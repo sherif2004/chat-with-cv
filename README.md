@@ -9,7 +9,7 @@ Every answer comes from the uploaded CVs, is written in the language you asked i
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B?logo=streamlit&logoColor=white)
 ![Azure](https://img.shields.io/badge/Cloud-Azure-0078D4?logo=microsoftazure&logoColor=white)
-![uv](https://img.shields.io/badge/Env-uv-7C6CF6)
+![conda](https://img.shields.io/badge/Env-conda-44A833?logo=anaconda&logoColor=white)
 
 </div>
 
@@ -114,7 +114,7 @@ Any text that comes from a CV is treated as data, not as instructions (see [Safe
 
 ### What happens when you open the app
 
-`uv run streamlit run app.py` starts [app.py](app.py). Streamlit runs that file from top to bottom at startup and again on every click or message:
+`streamlit run app.py` starts [app.py](app.py). Streamlit runs that file from top to bottom at startup and again on every click or message:
 
 1. Show the login and sign-up screen until someone is logged in (a session cookie keeps you logged in).
 2. Load the settings and connect to Azure (a missing `.env` value shows a clear error), and make sure this user's container and index exist.
@@ -130,7 +130,7 @@ Users sign up and log in with an email and password. Accounts, sessions and chat
 ```bash
 docker compose up -d          # starts Postgres on 127.0.0.1:5432
 cp .env.example .env          # DATABASE_URL is already filled in for this setup
-uv run streamlit run app.py
+streamlit run app.py
 ```
 
 Passwords are stored as argon2 hashes. A login is a random token in a browser cookie; only its hash is stored in the database, and it expires after 14 days or when you log out. The session is checked against the database on every page run, so ending it on one device (log out, password change, account deletion) also ends an already-open tab on another device at its next click. Sign-ups are capped at 15 users, because each user gets their own search index and the Azure Basic tier allows 15.
@@ -173,7 +173,8 @@ File names from uploads must be plain names: no `/` or `\`, no control character
 
 ### 1. What you need
 
-- [uv](https://docs.astral.sh/uv/) (it installs Python and all packages for you)
+- Python 3.11 or newer with pip, for example [Miniconda](https://docs.conda.io/en/latest/miniconda.html) (the packages go into the active conda environment, the base one is fine)
+- [Docker](https://docs.docker.com/get-docker/) for the local Postgres
 - An Azure account with these resources already created:
   - a **Storage account**
   - an **Azure AI Search** service on the **Basic tier or higher** (the semantic ranker is not available on Free)
@@ -184,7 +185,7 @@ File names from uploads must be plain names: no `/` or `\`, no control character
 ```bash
 git clone https://github.com/sherif2004/chat-with-cv.git
 cd chat-with-cv
-uv sync
+pip install -r requirements.txt   # installs into the active conda environment
 ```
 
 ### 3. Add your Azure settings
@@ -214,7 +215,7 @@ cp .env.example .env
 
 ```bash
 docker compose up -d      # Postgres for accounts and chats
-uv run streamlit run app.py
+streamlit run app.py
 ```
 
 The browser opens automatically. Each user's search index and Blob container are created when they sign up (and checked each time they log in). The first CV also loads the Docling layout models, which are downloaded on first use, so it takes noticeably longer than the next ones.
@@ -251,8 +252,7 @@ chat-with-cv/
 ├── .env.example              # template for your Azure and Postgres settings
 ├── docker-compose.yml        # Postgres for accounts and chats
 ├── .cache/                   # saved Docling output (created on first run, git-ignored)
-├── pyproject.toml            # dependencies (managed by uv)
-├── uv.lock                   # exact package versions
+├── requirements.txt          # the packages to install (pip install -r requirements.txt)
 └── cv_chat/
     ├── config.py             # reads .env and holds all settings
     ├── db.py                 # Postgres connection and tables (users, sessions, chats)
@@ -461,7 +461,7 @@ docker compose exec postgres psql -U cvchat -c "select id, email from users"
 Put some CVs in a local `cvs/` folder (it is git-ignored) and run (replace `<user id>`):
 
 ```bash
-uv run python -c "from pathlib import Path; from cv_chat.workspace import Workspace; from cv_chat.rag import ingest; ws = Workspace('<user id>'); ingest.prepare(ws); [print(p.name, ingest.process_cv(ws, p.name, p.read_bytes())) for p in Path('cvs').iterdir()]"
+python -c "from pathlib import Path; from cv_chat.workspace import Workspace; from cv_chat.rag import ingest; ws = Workspace('<user id>'); ingest.prepare(ws); [print(p.name, ingest.process_cv(ws, p.name, p.read_bytes())) for p in Path('cvs').iterdir()]"
 ```
 
 Each CV prints its chunk count and whether it was skipped as unchanged, or the error that stopped it.
@@ -469,5 +469,5 @@ Each CV prints its chunk count and whether it was skipped as unchanged, or the e
 To ask a question the same way, without the UI:
 
 ```bash
-uv run python -c "from cv_chat.workspace import Workspace; from cv_chat.rag import qa; a = qa.ask(Workspace('<user id>'), 'Who knows Kubernetes?', []); print(''.join(a.stream)); print(a.route, a.trace.to_dict()['total_ms'], 'ms')"
+python -c "from cv_chat.workspace import Workspace; from cv_chat.rag import qa; a = qa.ask(Workspace('<user id>'), 'Who knows Kubernetes?', []); print(''.join(a.stream)); print(a.route, a.trace.to_dict()['total_ms'], 'ms')"
 ```
