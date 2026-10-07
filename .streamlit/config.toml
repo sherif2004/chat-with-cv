@@ -1,0 +1,21 @@
+# Streamlit theme. Without a "base", it follows the user's light or dark setting.
+[theme]
+primaryColor = "#6d5bf6"
+baseRadius = "large"
+font = "sans-serif"
+
+[theme.light]
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f3fb"
+textColor = "#1f1b2e"
+
+[theme.dark]
+backgroundColor = "#0f1117"
+secondaryBackgroundColor = "#181b24"
+textColor = "#e8e8f0"
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false

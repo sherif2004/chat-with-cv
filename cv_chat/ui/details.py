@@ -1,4 +1,4 @@
-"""The Details dropdown under each answer: how the question was routed, what was searched and used, and where the time went."""
+"""The Details panel under each answer: how the question was routed, what was searched and used, and where the time went."""
 import streamlit as st
 
 from cv_chat.ui.safe import code, esc
@@ -16,38 +16,44 @@ def fmt(ms: float | None) -> str:
     return f"{ms:.0f} ms" if ms < 1000 else f"{ms / 1000:.1f} s"
 
 
+def title(trace: dict) -> str:
+    """The one-line label of the Details toggle: the route and the total time."""
+    route = ROUTE_NAMES.get(trace["route"], trace["route"] or "Unknown")
+    return f"Details · {route} · {fmt(trace['total_ms'])}"
+
+
 def render(trace: dict | None, sources: list[dict]) -> None:
+    """The body of the Details panel. The caller decides when to draw it, because building the tabs takes time."""
     if not trace:
         return
     events = trace["events"]
     route = ROUTE_NAMES.get(trace["route"], trace["route"] or "Unknown")
     searches = [e for e in events if e["stage"] == "search"]
-    with st.expander(f"Details · {route} · {fmt(trace['total_ms'])}", icon=":material/analytics:"):
-        columns = st.columns(4)
-        columns[0].metric("Route", route)
-        columns[1].metric("Total", fmt(trace["total_ms"]), help="From sending the question to the last word of the answer")
-        columns[2].metric("First word", fmt(trace["first_token_ms"]), help="How long until the answer started to appear")
-        columns[3].metric("Searches", len(searches), help="Searches run on Azure AI Search (cached ones included)")
+    columns = st.columns(4)
+    columns[0].metric("Route", route)
+    columns[1].metric("Total", fmt(trace["total_ms"]), help="From sending the question to the last word of the answer")
+    columns[2].metric("First word", fmt(trace["first_token_ms"]), help="How long until the answer started to appear")
+    columns[3].metric("Searches", len(searches), help="Searches run on Azure AI Search (cached ones included)")
 
-        tabs = ["Timeline", "Router", "Searches"]
-        has_agent = any(e["stage"] in ("agent_model", "tool") for e in events)
-        if has_agent:
-            tabs.append("Agent")
-        tabs += ["Excerpts used", "Settings"]
-        tab = dict(zip(tabs, st.tabs(tabs)))
-        with tab["Timeline"]:
-            _timeline(events, trace["total_ms"])
-        with tab["Router"]:
-            _router(events, route)
-        with tab["Searches"]:
-            _searches(events, trace["settings"]["query_expansion"])
-        if has_agent:
-            with tab["Agent"]:
-                _agent(events)
-        with tab["Excerpts used"]:
-            _excerpts(sources)
-        with tab["Settings"]:
-            _settings(trace)
+    tabs = ["Timeline", "Router", "Searches"]
+    has_agent = any(e["stage"] in ("agent_model", "tool") for e in events)
+    if has_agent:
+        tabs.append("Agent")
+    tabs += ["Excerpts used", "Settings"]
+    tab = dict(zip(tabs, st.tabs(tabs)))
+    with tab["Timeline"]:
+        _timeline(events, trace["total_ms"])
+    with tab["Router"]:
+        _router(events, route)
+    with tab["Searches"]:
+        _searches(events, trace["settings"]["query_expansion"])
+    if has_agent:
+        with tab["Agent"]:
+            _agent(events)
+    with tab["Excerpts used"]:
+        _excerpts(sources)
+    with tab["Settings"]:
+        _settings(trace)
 
 
 def _detail(event: dict) -> str:

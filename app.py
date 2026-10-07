@@ -1,10 +1,11 @@
 """Chat with CVs: Streamlit entry point. Run with `streamlit run app.py`."""
 import streamlit as st
 
-st.set_page_config(page_title="CV Chat", page_icon=":material/description:")
+st.set_page_config(page_title="CV Chat", page_icon=":material/description:", layout="wide")
 
-from cv_chat.ui import accounts
+from cv_chat.ui import accounts, style
 
+style.inject()  # the stylesheet and its animations, also for the login page
 user = accounts.current_user()  # shows the login screen and stops the page until someone is logged in
 accounts.account_menu(user)
 
@@ -40,4 +41,5 @@ view = st.segmented_control("View", ["Chat", "Candidates"], key="view", default=
 if view == "Candidates":
     candidates.render(ws, cvs)
 else:  # only the chosen view is drawn, so the Candidates page costs nothing while you chat
+    style.inject(reading_column=True)
     chat.render(ws, has_cvs=len(cvs) >= config.MIN_CVS)

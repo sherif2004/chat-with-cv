@@ -70,25 +70,30 @@ def current_user() -> auth.User:
 
 def _login_screen() -> str | None:
     """The login and sign-up forms. Returns a session token once someone has logged in or signed up."""
-    st.title("CV Chat")
-    login_tab, signup_tab = st.tabs(["Log in", "Sign up"])
-    with login_tab, st.form("login"):
-        email = st.text_input("Email")
-        password = st.text_input("Password", type="password")
-        if st.form_submit_button("Log in", type="primary"):
-            try:
-                return auth.log_in(email, password)
-            except auth.AuthError as error:
-                st.error(str(error))
-    with signup_tab, st.form("signup"):
-        email = st.text_input("Email", key="signup_email")
-        password = st.text_input(f"Password (at least {auth.MIN_PASSWORD} characters)", type="password", key="signup_password")
-        if st.form_submit_button("Create account", type="primary"):
-            try:
-                auth.sign_up(email, password, on_created=_provision)
-                return auth.log_in(email, password)
-            except auth.AuthError as error:
-                st.error(str(error))
+    _, middle, _ = st.columns([1, 2, 1])
+    with middle:
+        st.html('<div class="cv-brand"><div class="cv-brand-name">CV Chat</div><div class="cv-brand-tag">Ask questions about your candidates</div></div>')
+        with st.container(border=True):
+            login_tab, signup_tab = st.tabs(["Log in", "Sign up"])
+            with login_tab, st.form("login", border=False):
+                email = st.text_input("Email", autocomplete="email")
+                password = st.text_input("Password", type="password", autocomplete="current-password")
+                if st.form_submit_button("Log in", type="primary", width="stretch"):
+                    try:
+                        return auth.log_in(email, password)
+                    except auth.AuthError as error:
+                        st.error(str(error))
+            with signup_tab, st.form("signup", border=False):
+                email = st.text_input("Email", key="signup_email", autocomplete="email")
+                password = st.text_input(
+                    f"Password (at least {auth.MIN_PASSWORD} characters)", type="password", key="signup_password", autocomplete="new-password",
+                )
+                if st.form_submit_button("Create account", type="primary", width="stretch"):
+                    try:
+                        auth.sign_up(email, password, on_created=_provision)
+                        return auth.log_in(email, password)
+                    except auth.AuthError as error:
+                        st.error(str(error))
     return None
 
 

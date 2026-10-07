@@ -151,7 +151,15 @@ Your email at the top of the sidebar opens the account menu:
 
 ### Chats
 
-Every answer is saved. **New chat** starts a fresh one, and past chats are listed below it (newest first). Click one to reopen it with its sources and details, or use its menu to rename or delete it. The model still only sees the last few messages of a chat.
+Every answer is saved, like in other chat apps. The sidebar has **New chat**, a **Search chats** box and the list of your chats grouped under **Today**, **Yesterday**, **Previous 7 days** and **Older**, newest first. The open chat is highlighted and its title is shown above the conversation, where you can rename it. Click a chat to reopen it with its sources and details. Each chat's ⋮ menu renames it, or deletes it after you tick a confirmation. Search looks in chat titles and in the text of every question and answer, and only ever in your own chats. The list shows 30 chats at first, with **Show more**. The model still only sees the last few messages of a chat.
+
+### Look and speed
+
+- **Fast clicks.** The list of CVs is kept for a few minutes instead of asking Azure Blob Storage on every click (it refreshes after an upload, a delete, or a re-index). Details panels are built only when you switch **Details** on under an answer, and a long chat first draws its latest 20 messages, with **Load earlier messages** for the rest.
+- **Theme.** The colours come from [.streamlit/config.toml](.streamlit/config.toml), with a light and a dark theme that follow your system setting. The accent colour, the animations and the right-to-left rules are in [cv_chat/ui/styles.css](cv_chat/ui/styles.css).
+- **Animation.** Messages, cards and the welcome screen fade up when they appear, buttons and cards respond when you hover or press them, and the login page eases in. If your system is set to reduce motion, all animation is switched off.
+- **Right-to-left languages.** Questions and answers in Arabic, Hebrew and similar languages are aligned from the right, paragraph by paragraph, and mixed text works too.
+- **Small screens.** The layout works down to phone width (the sidebar opens over the page, and each chat's title and menu stay on one line).
 
 ### Candidates view
 
@@ -233,7 +241,7 @@ The browser opens automatically. Each user's search index and Blob container are
 2. **Process.** Click **Process CVs**. The files are processed in the background, 4 at a time, and a live status list in the sidebar refreshes every 2 seconds. Each file shows *waiting*, then the stage it is in (*reading layout*, *reading name, title and experience*, *embedding*, *saving*), then a green check with its chunk count, a grey check if it was already indexed and unchanged, or a red mark and the reason if it failed. A progress bar and a line such as "4 running in parallel · 3 waiting" show the whole batch. You can keep using the app while it runs; when the last file finishes the CV list updates by itself. **Clear status** removes the finished entries.
 3. **Ask.** Type a question in any language, or click one of the suggested questions on the welcome screen. The answer streams in as it is written, in the language you asked in. While it works, a status box shows what is happening (the router's decision, each search, each agent step).
 4. **Check the sources.** Open **Sources** under an answer to see which CVs it used and the most relevant passage of each.
-5. **Check the details.** Open **Details** (the line shows the route and the total time) for tabs with: a *Timeline* of every step with its time and share of the total (router, query expansion, each search, agent rounds and tools, the model's wait for its first word, writing the answer); the *Router* result (class, standalone question, sections searched); every *Search* (query, chunks found, filters, cached or not); the *Agent* rounds and tool calls; the exact *Excerpts used*; and the *Settings* (model deployments, query expansion, answer cache). Details are kept with each message for the whole chat.
+5. **Check the details.** Switch on **Details** (its label shows the route and the total time) for tabs with: a *Timeline* of every step with its time and share of the total (router, query expansion, each search, agent rounds and tools, the model's wait for its first word, writing the answer); the *Router* result (class, standalone question, sections searched); every *Search* (query, chunks found, filters, cached or not); the *Agent* rounds and tool calls; the exact *Excerpts used*; and the *Settings* (model deployments, query expansion, answer cache). Details are kept with each message for the whole chat.
 6. **Manage a CV.** Open **Manage a CV** in the sidebar, pick a CV, then:
    - **Re-index** queues the stored file for processing again (for example after the pipeline changed) and shows it in the same status list,
    - **Delete** removes it from Blob Storage and from search, after a confirmation. If this leaves fewer than 8 CVs, the chat is disabled until you add more,
@@ -255,6 +263,7 @@ Your CVs stay in Azure, so they are still there after you close the app. The sid
 chat-with-cv/
 ├── app.py                    # Streamlit entry point
 ├── .env.example              # template for your Azure and Postgres settings
+├── .streamlit/config.toml    # the light and dark theme
 ├── docker-compose.yml        # Postgres for accounts and chats
 ├── .cache/                   # saved Docling output (created on first run, git-ignored)
 ├── requirements.txt          # the packages to install (pip install -r requirements.txt)
@@ -285,11 +294,13 @@ chat-with-cv/
     └── ui/                   # Streamlit screens
         ├── accounts.py           # login and sign-up screen, session cookie, account menu
         ├── candidates.py         # the Candidates view
-        ├── sidebar.py            # chats, upload, process, list of CVs
+        ├── chats.py              # the chat list: search, grouping by age, open, rename, delete
+        ├── sidebar.py            # account menu, upload, process, list of CVs
+        ├── style.py              # adds the stylesheet to every page
         ├── chat.py               # conversation and sources
-        ├── details.py            # the Details dropdown: route, timeline, searches, agent, excerpts
+        ├── details.py            # the Details panel: route, timeline, searches, agent, excerpts
         ├── safe.py               # escapes CV text and strips images before anything is drawn
-        └── styles.css            # styling of the welcome screen
+        └── styles.css            # animations, right-to-left text, welcome and login styling
 ```
 
 The code is split so each part has one job and imports only what is below it:

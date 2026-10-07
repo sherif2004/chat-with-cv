@@ -1,12 +1,10 @@
 """Main area: chat with the indexed CVs."""
-from pathlib import Path
-
 import streamlit as st
 
 from cv_chat import config, history
 from cv_chat.rag import qa
 from cv_chat.services import blob_storage
-from cv_chat.ui import details, safe
+from cv_chat.ui import chats, details, safe
 from cv_chat.workspace import Workspace
 
 ROUTE_NOTES = {
@@ -23,17 +21,43 @@ SUGGESTIONS = [
 ]
 
 
+SHOWN = 20  # messages drawn at first in a long chat, and added by each "Load earlier messages"
+
+
 def render(ws: Workspace, has_cvs: bool) -> None:
-    st.html(Path(__file__).with_name("styles.css"))
     question = st.chat_input("Ask about skills, experience, education...", disabled=not has_cvs)
     question = question or st.session_state.pop("suggested_question", None)
 
-    if not st.session_state.messages and not question:
+    _header(ws)
+    messages = st.session_state.messages
+    if not messages and not question:
         _welcome(has_cvs)
-    for message in st.session_state.messages:
-        _show(ws, message)
+    hidden = max(len(messages) - (st.session_state.get("shown_messages") or SHOWN), 0)
+    if hidden:  # a long chat draws only its latest messages, so every click stays fast
+        st.button(f"Load earlier messages ({hidden})", icon=":material/history:", type="tertiary", on_click=_load_earlier)
+    for index in range(hidden, len(messages)):
+        _show(ws, messages[index], index)
     if question:
         _answer(ws, question)
+
+
+def _load_earlier() -> None:
+    st.session_state.shown_messages = (st.session_state.get("shown_messages") or SHOWN) + SHOWN
+
+
+def _header(ws: Workspace) -> None:
+    """The title of the open chat, with a way to rename it."""
+    conversation_id = st.session_state.get("conversation_id")
+    title = history.title(ws.user_id, conversation_id) if conversation_id else None
+    if title is None:
+        return
+    title_column, rename_column = st.columns([12, 1], vertical_alignment="center")
+    title_column.markdown(f"#### {safe.esc(title)}")
+    with rename_column.popover("", icon=":material/edit:", width="content"):
+        key = f"header_name_{conversation_id}"
+        st.text_input("Chat name", value=title, key=key, max_chars=history.TITLE_LENGTH)
+        st.button("Rename", key=f"header_rename_{conversation_id}", icon=":material/check:", width="stretch",
+                  on_click=chats.rename_chat, args=(ws, conversation_id, key))
 
 
 def _welcome(has_cvs: bool) -> None:
@@ -63,14 +87,21 @@ def _suggest(question: str) -> None:
     st.session_state.suggested_question = question
 
 
-def _show(ws: Workspace, message: dict) -> None:
+def _show(ws: Workspace, message: dict, index: int | None = None) -> None:
     with st.chat_message(message["role"], avatar=AVATARS[message["role"]]):
         st.markdown(message["content"])
         if message.get("trace"):
-            details.render(message["trace"], message.get("sources", []))
+            _details(f"details_{st.session_state.get('conversation_id')}_{index}", message["trace"], message.get("sources", []))
         else:
             _route_note(message.get("route"))
         _sources(ws, message.get("sources", []))
+
+
+def _details(key: str, trace: dict, sources: list[dict]) -> None:
+    """Details are built only when asked for: drawing the tabs of every answer on every click made long chats slow."""
+    if st.toggle(details.title(trace), key=key):
+        with st.container(border=True):
+            details.render(trace, sources)
 
 
 def _answer(ws: Workspace, question: str) -> None:
@@ -90,7 +121,6 @@ def _answer(ws: Workspace, question: str) -> None:
             st.error(f"Could not answer: {str(error).splitlines()[0]}", icon=":material/error:")
             return
         record = trace.to_dict()  # complete now that the answer has been written
-        details.render(record, sources)
         _sources(ws, sources)
     exchange = [
         {"role": "user", "content": question},

@@ -1,39 +1,88 @@
-/* Styles only the app's own hero markup (ui/chat.py).
-   Streamlit's widgets are themed through .streamlit/config.toml. */
+/* The app's own look: animations, right-to-left text, and the welcome screen.
+   Colours come from the Streamlit theme (.streamlit/config.toml); only the accent below is set here. */
 
-.cv-hero {
-  padding: 2.5rem 0 1.75rem;
-  text-align: center;
+:root { --cv-accent: #6d5bf6; --cv-ease: cubic-bezier(0.22, 1, 0.36, 1); }
+
+@media (prefers-color-scheme: dark) { :root { --cv-accent: #a396ff; } }
+
+html { scroll-behavior: smooth; }
+
+/* ---- Entrances: things fade up when they appear ---- */
+@keyframes cv-rise  { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes cv-fade  { from { opacity: 0; } to { opacity: 1; } }
+@keyframes cv-shine { 0% { background-position: 0% 50%; } 100% { background-position: 200% 50%; } }
+@keyframes cv-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+[data-testid="stChatMessage"] { animation: cv-rise 0.4s var(--cv-ease) both; }
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] { animation: cv-rise 0.45s var(--cv-ease) both; }
+[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] { animation: cv-fade 0.3s ease both; }
+[data-testid="stToast"] { animation: cv-rise 0.3s var(--cv-ease) both; }
+
+/* ---- Hover and press feedback ---- */
+[data-testid="stBaseButton-secondary"], [data-testid="stBaseButton-primary"], [data-testid="stBaseButton-tertiary"],
+[data-testid="stBaseLinkButton-secondary"], [data-testid="stPopoverButton"] {
+  transition: transform 0.15s var(--cv-ease), box-shadow 0.2s ease, background-color 0.2s ease, border-color 0.2s ease;
 }
+[data-testid="stBaseButton-secondary"]:hover, [data-testid="stBaseButton-primary"]:hover,
+[data-testid="stBaseLinkButton-secondary"]:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(109, 91, 246, 0.18); }
+[data-testid="stBaseButton-secondary"]:active, [data-testid="stBaseButton-primary"]:active,
+[data-testid="stBaseButton-tertiary"]:active { transform: scale(0.98); }
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] { transition: transform 0.2s var(--cv-ease), box-shadow 0.25s ease, border-color 0.25s ease; }
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:hover { border-color: var(--cv-accent); }
+[data-testid="stSidebar"] [data-testid="stBaseButton-tertiary"]:hover { background-color: rgba(109, 91, 246, 0.10); }
+
+/* While the app is working, Streamlit shows its running indicator: let it breathe */
+[data-testid="stStatusWidget"] { animation: cv-pulse 1.4s ease-in-out infinite; }
+
+/* ---- Right-to-left text (Arabic, Hebrew...): each paragraph takes the direction of its own first letters ---- */
+[data-testid="stChatMessage"] :is(p, li, h1, h2, h3, h4, h5, h6, td, th, caption),
+[data-testid="stSidebar"] [data-testid="stBaseButton-tertiary"] p,
+[data-testid="stSidebar"] [data-testid="stBaseButton-secondary"] p,
+[data-testid="stMain"] h4 { unicode-bidi: plaintext; text-align: start; }
+[data-testid="stChatInputTextArea"] { unicode-bidi: plaintext; text-align: start; }
+
+/* ---- The chat list: titles left-aligned and cut off with an ellipsis, menu buttons without the chevron ---- */
+[class*="st-key-open_"] button, [class*="st-key-open_"] button > div, [class*="st-key-open_"] button > div > span { justify-content: flex-start; }
+[class*="st-key-open_"] button p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; text-align: start; }
+[class*="st-key-chatmenu_"] [data-testid="stPopoverButton"] > div > div[aria-hidden="true"] { display: none; }
+[class*="st-key-chatmenu_"] [data-testid="stPopoverButton"] { padding-inline: 0.25rem; }
+
+/* On a phone Streamlit stacks columns; a chat's title and its menu button must stay on one line */
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:has([class*="st-key-open_"]) { flex-wrap: nowrap; }
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:has([class*="st-key-open_"]) > [data-testid="stColumn"] { min-width: 0; }
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:has([class*="st-key-open_"]) > [data-testid="stColumn"]:last-child { flex: 0 0 2.5rem; width: 2.5rem; }
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:has([class*="st-key-open_"]) > [data-testid="stColumn"]:first-child { flex: 1 1 0; width: auto; }
+
+/* ---- Welcome screen ---- */
+.cv-hero { padding: 2.5rem 0 1.75rem; text-align: center; }
+.cv-hero > * { animation: cv-rise 0.6s var(--cv-ease) both; }
+.cv-hero > :nth-child(2) { animation-delay: 0.08s; }
+.cv-hero > :nth-child(3) { animation-delay: 0.16s; }
 
 .cv-hero-eyebrow {
-  display: inline-block;
-  padding: 0.25rem 0.75rem;
-  border: 1px solid rgba(124, 108, 246, 0.35);
-  border-radius: 999px;
-  background: rgba(124, 108, 246, 0.12);
-  color: #c4b5fd;
-  font-size: 0.8rem;
-  font-weight: 500;
-  letter-spacing: 0.02em;
+  display: inline-block; padding: 0.25rem 0.75rem; border: 1px solid rgba(109, 91, 246, 0.35); border-radius: 999px;
+  background: rgba(109, 91, 246, 0.10); color: var(--cv-accent); font-size: 0.8rem; font-weight: 500; letter-spacing: 0.02em;
 }
-
 .cv-hero-title {
-  margin-top: 1rem;
-  font-size: 2.75rem;
-  font-weight: 700;
-  line-height: 1.15;
-  letter-spacing: -0.03em;
-  background: linear-gradient(90deg, #a5b4fc 0%, #8b7cf6 50%, #f0abfc 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  margin-top: 1rem; font-size: 2.75rem; font-weight: 700; line-height: 1.15; letter-spacing: -0.03em;
+  background: linear-gradient(90deg, #7c6cf6, #c026d3, #6d5bf6, #7c6cf6); background-size: 200% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent; animation: cv-rise 0.6s var(--cv-ease) 0.08s both, cv-shine 8s linear infinite;
+}
+.cv-hero-subtitle { max-width: 32rem; margin: 0.75rem auto 0; opacity: 0.7; font-size: 1.05rem; line-height: 1.6; }
+
+/* ---- Login ---- */
+.cv-brand { text-align: center; margin: 2rem 0 1rem; animation: cv-rise 0.5s var(--cv-ease) both; }
+.cv-brand-name { font-size: 2rem; font-weight: 700; letter-spacing: -0.02em; }
+.cv-brand-tag { opacity: 0.65; margin-top: 0.25rem; }
+
+/* ---- Small screens ---- */
+@media (max-width: 640px) {
+  .cv-hero { padding-top: 1.25rem; }
+  .cv-hero-title { font-size: 2rem; }
+  [data-testid="stMainBlockContainer"] { padding-left: 1rem; padding-right: 1rem; }
 }
 
-.cv-hero-subtitle {
-  max-width: 32rem;
-  margin: 0.75rem auto 0;
-  color: #94a3b8;
-  font-size: 1.05rem;
-  line-height: 1.6;
+/* ---- People who ask their system for less motion get none ---- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }

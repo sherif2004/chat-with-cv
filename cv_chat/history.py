@@ -50,6 +50,31 @@ def list_conversations(user_id: str, limit: int = 30) -> list[Conversation]:
     return [Conversation(str(row[0]), row[1], row[2]) for row in rows]
 
 
+def search_conversations(user_id: str, query: str, limit: int = 30) -> list[Conversation]:
+    """The user's chats whose title or any message contains the text, newest first. Never reaches another user's chats."""
+    text = " ".join(query.split())
+    if len(text) < 2:
+        return []
+    pattern = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"  # the text is matched literally
+    with db.pool().connection() as conn:
+        rows = conn.execute(
+            "SELECT c.id, c.title, c.updated_at FROM conversations c WHERE c.user_id = %s AND (c.title ILIKE %s ESCAPE '\\' "
+            "OR EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.content ILIKE %s ESCAPE '\\')) "
+            "ORDER BY c.updated_at DESC LIMIT %s",
+            (user_id, pattern, pattern, limit),
+        ).fetchall()
+    return [Conversation(str(row[0]), row[1], row[2]) for row in rows]
+
+
+def title(user_id: str, conversation_id: str) -> str | None:
+    """The title of one of the user's chats, or None if there is no such chat of theirs."""
+    if not _is_uuid(conversation_id):
+        return None
+    with db.pool().connection() as conn:
+        row = conn.execute("SELECT title FROM conversations WHERE id = %s AND user_id = %s", (conversation_id, user_id)).fetchone()
+    return row[0] if row else None
+
+
 def load_messages(user_id: str, conversation_id: str) -> list[dict] | None:
     """The messages of one of the user's chats, or None if there is no such chat of theirs."""
     if not _is_uuid(conversation_id):
