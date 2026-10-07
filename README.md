@@ -120,6 +120,24 @@ Any text that comes from a CV is treated as data, not as instructions (see [Safe
 
 ---
 
+## Accounts and Postgres
+
+Users sign up and log in with an email and password. Accounts and sessions are stored in Postgres, which runs in Docker:
+
+```bash
+docker compose up -d          # starts Postgres on 127.0.0.1:5432
+cp .env.example .env          # DATABASE_URL is already filled in for this setup
+uv run streamlit run app.py
+```
+
+Passwords are stored as argon2 hashes. A login is a random token in a browser cookie; only its hash is stored in the database, and it expires after 14 days or when you log out. Sign-ups are capped at 15 users (one search index per user is planned, and the Azure Basic tier allows 15).
+
+To run the tests: `uv run pytest`. They use a separate `cvchat_test` database that they create themselves.
+
+**Status:** login and sign-up are done. Per-user containers and indexes, chat history, NER extraction and the UI changes are the next steps (see `docs/superpowers/specs/2026-10-07-accounts-design.md`). Until per-user containers land, all users still share one set of CVs.
+
+---
+
 ## Quick start
 
 ### 1. What you need

@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cvchat
+      POSTGRES_PASSWORD: cvchat
+      POSTGRES_DB: cvchat
+    ports:
+      - "127.0.0.1:5432:5432"  # local only
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cvchat"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  pgdata:

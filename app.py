@@ -3,6 +3,11 @@ import streamlit as st
 
 st.set_page_config(page_title="CV Chat", page_icon=":material/description:")
 
+from cv_chat.ui import accounts
+
+user = accounts.current_user()  # shows the login screen and stops the page until someone is logged in
+accounts.logout_button()
+
 try:
     from cv_chat import config
     from cv_chat.rag import ingest

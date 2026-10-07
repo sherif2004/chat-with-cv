@@ -1,0 +1,93 @@
+"""Accounts: sign up, log in, and the sessions that keep a user logged in.
+
+Passwords are stored as argon2 hashes. A session token is random; only its SHA-256 hash is stored,
+so a leaked database does not give anyone a working login.
+"""
+import hashlib
+import re
+import secrets
+from dataclasses import dataclass
+
+from argon2 import PasswordHasher
+from argon2.exceptions import VerificationError
+
+from cv_chat import db
+
+MAX_USERS = 15  # one Azure AI Search index per user, and the Basic tier allows 15
+MIN_PASSWORD = 8
+SESSION_DAYS = 14
+
+_hasher = PasswordHasher()
+_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_DUMMY_HASH = _hasher.hash("not-a-real-password")  # checked for unknown emails, so timing does not reveal which exist
+
+
+class AuthError(ValueError):
+    """A problem to show the user as it is."""
+
+
+@dataclass(frozen=True)
+class User:
+    id: str
+    email: str
+
+
+def _digest(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def sign_up(email: str, password: str) -> User:
+    email = email.strip().lower()
+    if not _EMAIL.match(email) or len(email) > 254:
+        raise AuthError("Enter a valid email address.")
+    if len(password) < MIN_PASSWORD:
+        raise AuthError(f"The password needs at least {MIN_PASSWORD} characters.")
+    password_hash = _hasher.hash(password)
+    with db.pool().connection() as conn:
+        conn.execute("SELECT pg_advisory_xact_lock(1)")  # one sign-up at a time, so the user cap cannot be passed
+        if conn.execute("SELECT count(*) FROM users").fetchone()[0] >= MAX_USERS:
+            raise AuthError(f"Sign-ups are closed: this demo allows {MAX_USERS} users.")
+        if conn.execute("SELECT 1 FROM users WHERE email = %s", (email,)).fetchone():
+            raise AuthError("An account with this email already exists.")
+        user_id = conn.execute(
+            "INSERT INTO users (email, password_hash) VALUES (%s, %s) RETURNING id", (email, password_hash)
+        ).fetchone()[0]
+    return User(str(user_id), email)
+
+
+def log_in(email: str, password: str) -> str:
+    """Check the password and return a new session token to store in the browser."""
+    email = email.strip().lower()
+    with db.pool().connection() as conn:
+        row = conn.execute("SELECT id, password_hash FROM users WHERE email = %s", (email,)).fetchone()
+        try:
+            _hasher.verify(row[1] if row else _DUMMY_HASH, password)
+        except VerificationError:
+            row = None
+        if row is None:
+            raise AuthError("Wrong email or password.")
+        token = secrets.token_urlsafe(32)
+        conn.execute(
+            "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (%s, %s, now() + make_interval(days => %s))",
+            (_digest(token), row[0], SESSION_DAYS),
+        )
+        conn.execute("DELETE FROM sessions WHERE expires_at < now()")
+    return token
+
+
+def user_for_token(token: str | None) -> User | None:
+    if not token:
+        return None
+    with db.pool().connection() as conn:
+        row = conn.execute(
+            "SELECT u.id, u.email FROM sessions s JOIN users u ON u.id = s.user_id "
+            "WHERE s.token_hash = %s AND s.expires_at > now()",
+            (_digest(token),),
+        ).fetchone()
+    return User(str(row[0]), row[1]) if row else None
+
+
+def log_out(token: str | None) -> None:
+    if token:
+        with db.pool().connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE token_hash = %s", (_digest(token),))
