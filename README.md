@@ -63,17 +63,17 @@ flowchart LR
     A["CV file<br/>PDF or DOCX"] --> H{"Already indexed<br/>and unchanged?"}
     H -- yes --> Z["Skip"]
     H -- no --> B["Extract with Docling<br/>layout, headings, tables"]
-    B --> M["Read name, title,<br/>years, contact<br/>one model call"]
-    M --> C["Split by section"]
-    C --> D["Embed each chunk<br/>Azure OpenAI"]
+    B --> C["Split by section"]
+    C --> M["Read name, title, years,<br/>contact: spaCy NER + rules<br/>no model call"]
+    M --> D["Embed each chunk<br/>Azure OpenAI"]
     D --> E[("Azure AI Search<br/>chunks and vectors")]
     A --> F[("Azure Blob Storage<br/>original file")]
 ```
 
-1. **Skip unchanged CVs.** Every chunk is stored with a hash of the file content (plus a fingerprint of the extraction, chunking, section and metadata code and settings). If the stored hash matches, the CV is skipped and shown as "already indexed, unchanged".
+1. **Skip unchanged CVs.** Every chunk is stored with a hash of the file content (plus a fingerprint of the extraction, chunking, section and details-reading code and settings). If the stored hash matches, the CV is skipped and shown as "already indexed, unchanged".
 2. **Extract with Docling.** [Docling](https://github.com/docling-project/docling) reads the page layout, so multi-column CVs come out in the right reading order, tables become markdown, and section headings are detected. It handles PDF and DOCX. The result is cached on disk in `.cache/extracted/` (by file content), so changing the chunking never runs Docling again.
-3. **Read the CV's metadata.** One model call reads the candidate's name, current job title, total years of experience (counted from the dated jobs), email, phone and location. They are stored on every chunk of that CV. If the call fails or is refused, the CV is still indexed with empty metadata. The values come from a model, so treat years of experience as an estimate. Contact details are personal data: they are stored in the search index like the rest of the CV text.
-4. **Split by section.** The CV is cut at its headings (the ones Docling found, plus short ALL-CAPS lines). Each section becomes one chunk and starts with its heading. Only a section longer than `CHUNK_SIZE` (1500 characters) is split further, with 20% overlap, preferring line breaks. Text before the first heading goes under "Other".
+3. **Split by section.** The CV is cut at its headings (the ones Docling found, plus short ALL-CAPS lines). Each section becomes one chunk and starts with its heading. Only a section longer than `CHUNK_SIZE` (1500 characters) is split further, with 20% overlap, preferring line breaks. Text before the first heading goes under "Other".
+4. **Read the CV's details (NER and rules, no model call).** [spaCy](https://spacy.io) named entity recognition reads the top of the CV for the candidate's **name** (a PERSON) and **location** (a place, written "City, Country" when two follow each other). **Email** and **phone** come from patterns. The **job title** is the line under the name that contains a job word (engineer, manager, analyst and so on), or else the first job listed, because NER does not label job titles. **Years of experience** are the time covered by the dated jobs in the Experience section: a range like `Jan 2019 – Present` or `2015-2019`, overlapping jobs counted once, "Present" counted as today, education dates ignored. If the CV has no dates, a sentence such as "10 years of professional experience" is used. Everything is stored on every chunk of that CV. Anything that cannot be read is left empty, and reading takes a few milliseconds per CV. These are rules and a small model, so they are less accurate than a language model: unusual layouts can give an empty or wrong name, title or location, and years are an estimate. Check the **Candidates** view after uploading.
 5. **Label each chunk.** The heading is kept as `section` (as written in the CV) and also mapped to a standard `section_type`: experience, education, skills, projects, summary, certifications, languages, contact or other. The page number is stored too.
 6. **Embed each chunk.** An embedding is a list of numbers that captures the meaning of a text. Each chunk is sent to Azure OpenAI together with its file name and the candidate's name and title, so even a chunk from page 3 still points to the right CV. Requests go out in batches of 16, and a shared limit of 2 requests in flight keeps parallel CVs from hitting rate limits.
 7. **Save to Azure AI Search.** The new chunks are uploaded first, then chunks the new version no longer has are deleted, so a CV is never missing from the index.
@@ -271,10 +271,11 @@ chat-with-cv/
     ├── processing/           # no Azure
     │   ├── extract.py            # Docling: PDF / DOCX to pages and headings (cached)
     │   ├── chunking.py           # pages to section-based chunks
+    │   ├── entities.py           # spaCy NER and rules: name, title, years, contact, location
     │   └── sections.py           # heading to standard section type
     ├── rag/                  # the two pipelines
     │   ├── cache.py              # in-memory cache of router results, searches and answers
-    │   ├── metadata.py           # one model call per CV: name, title, years, contact
+    │   ├── metadata.py           # how a CV's details are shown to the model and the agent
     │   ├── trace.py              # what happened while one question was answered, with timings
     │   ├── agent.py              # tool-using agent for complex questions (capped rounds and time)
     │   ├── ingest.py             # upload flow: skip check, extract, chunk, embed, save; delete
@@ -303,7 +304,7 @@ flowchart TD
 ```
 
 - `services/` talks to Azure and nothing else. Each file wraps one service.
-- `processing/` never touches Azure or Streamlit, so it can be tested on its own. (`extract.py` needs Docling installed, but nothing else.)
+- `processing/` never touches Azure or Streamlit, so it can be tested on its own. (`extract.py` needs Docling installed and `entities.py` needs spaCy, but nothing else.)
 - `rag/` combines the two into the upload and question pipelines. It never imports Streamlit.
 - `ui/` only draws screens and calls `rag/`.
 
@@ -331,7 +332,7 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 | `EXPANDED_QUERIES` | `2` | Alternative queries searched when **Query expansion** is on |
 | `RRF_K` | `60` | Reciprocal rank fusion constant used to merge the searches |
 | `CACHE_SIZE` | `256` | Entries kept per kind of cached result (router, search, answer) |
-| `METADATA_CHARS` | `12000` | Most characters of a CV read for its metadata |
+| `NER_MODEL` | `"en_core_web_sm"` | The spaCy model that finds the candidate's name and location |
 | `MAX_YEARS` | `60` | A years-of-experience value above this is treated as wrong |
 | `AGENT_MAX_ROUNDS` | `5` | Tool rounds the agent may take for one complex question |
 | `AGENT_MAX_SECONDS` | `30` | Time budget for those rounds, then it answers with what it found |
@@ -349,7 +350,7 @@ The search index settings (text analyzer `en.microsoft`, field weights, boosted 
 
 - **Uploading the same file again is cheap.** If the content has not changed it is skipped. If it has, its chunks are replaced and any leftover chunks from the old version are deleted.
 - **Same CV under a different file name counts as a different CV.** `cv.pdf` and `cv (1).pdf` are stored separately.
-- **After changing extraction or chunking code or settings**, click **Update outdated CVs** (under **Manage a CV**), or **Process CVs** with the files again. The change is detected automatically and the CVs are re-indexed, even though the files are unchanged; CVs already up to date are skipped. (Any edit to `extract.py`, `chunking.py`, `sections.py` or `metadata.py`, even a comment, counts as a change.)
+- **After changing extraction or chunking code or settings**, click **Update outdated CVs** (under **Manage a CV**), or **Process CVs** with the files again. The change is detected automatically and the CVs are re-indexed, even though the files are unchanged; CVs already up to date are skipped. (Any edit to `extract.py`, `chunking.py`, `sections.py` or `entities.py`, even a comment, counts as a change.)
 - **Using an index from an older version of the app:** delete it in the Azure portal (each user's index is named `<AZURE_SEARCH_INDEX>-<user id>`) and process the CVs again. Azure cannot change an analyzer, a field's filterable flag or the vector metric on an existing index, so the app stops at start-up with a message that names what is outdated. After recreating it, click **Update outdated CVs** to index the stored CVs again.
 - **The first CV is slow.** Docling loads its layout models on first use. After that, extraction takes a few seconds per CV on CPU. A GPU (`DOCLING_DEVICE = "cuda"`) is much faster.
 - **Delete is permanent.** It removes the original file from Blob Storage and the CV from the index.
@@ -358,7 +359,7 @@ The search index settings (text analyzer `en.microsoft`, field weights, boosted 
 - **Every question makes a router call** before the search, which adds a little time before the answer starts streaming. Query expansion adds one more call and two more searches. A complex question can take several model calls, often 10 to 30 seconds.
 - **Simple questions send only the relevant CVs** (top-p, at most `MAX_CVS` CVs and `MAX_CHUNKS_PER_CV` excerpts each), so a question about a large pile of CVs may not cover every one. That is what the agent is for.
 - **The search is built for English CVs.** The keyword analyzer is English, and the router writes the search query in English. Questions can be in any language, but CVs in another language would need another analyzer and a new index.
-- **Years of experience are an estimate** read by a model from the dated jobs ("Present" counts as today). A CV whose years could not be read never matches a years filter.
+- **Years of experience are an estimate** worked out from the dated jobs in the Experience section ("Present" counts as today, overlapping jobs count once). A CV whose years could not be read never matches a years filter.
 - **Contact details are personal data.** Email, phone and location are stored as fields in the search index, next to the CV text. Anyone with the search key can read them.
 - **Each user sees only their own CVs and chats.** Sign-up is open to anyone who can reach the app (until the 15-user cap), so put the app behind your own access control, and HTTPS, before using real candidate data.
 - **The caches live in the memory of the app process.** They are empty after a restart and are not shared between several copies of the app. Each user has their own cache, shared by that user's browser sessions. Entries that depend on a conversation (router results, final answers) include the recent chat in their key, so only an identical conversation can reuse them.
@@ -406,7 +407,7 @@ The reasoning, limits and costs behind each part of the chat side.
 
 ### Search boosts and CV metadata
 
-Keyword matching uses a scoring profile (`cv`): a match in the candidate name counts 3 times as much as the same words in the body text, job title and file name 2 times, the section heading 1.5 times, and chunks from the *experience* and *skills* sections get a further boost. The semantic ranker then re-orders the best results as before. The keyword analyzer is English (`en.microsoft`), and the section headings are searchable. The metadata (name, title, years, contact) is read once per CV by one model call at upload time and stored on every chunk.
+Keyword matching uses a scoring profile (`cv`): a match in the candidate name counts 3 times as much as the same words in the body text, job title and file name 2 times, the section heading 1.5 times, and chunks from the *experience* and *skills* sections get a further boost. The semantic ranker then re-orders the best results as before. The keyword analyzer is English (`en.microsoft`), and the section headings are searchable. The details (name, title, years, contact, location) are read once per CV at upload time by spaCy and rules (no model call) and stored on every chunk.
 
 ### Answer language
 
@@ -417,7 +418,7 @@ The answer, the greeting reply and the agent's answer use the language of your l
 CV text is written by third parties and is treated as data, not as instructions:
 
 - **Prompts.** Excerpts and the agent's CV list are wrapped in `<cv_excerpt>` tags, tags inside CV text are removed repeatedly (so a split tag cannot rebuild a closing tag), and the system prompts say to never follow instructions found inside them.
-- **Extracted metadata** has angle brackets removed, and implausible years are dropped.
+- **Extracted details** have angle brackets removed, and implausible years are dropped.
 - **Azure's jailbreak filter.** If it refuses a request because of an excerpt, the app finds the flagged excerpt by halving the list, answers from the rest and adds a note naming the CV. It does not fail every question that retrieves that CV.
 - **Drawing.** Text from CVs, file names and models is escaped before it is shown (so `![x](https://...)` cannot load an image), and image syntax in an answer is turned into a plain link. Links in answers are still clickable.
 
@@ -438,6 +439,7 @@ Most problems now show a message that says what to check. These are the ones you
 | `Could not reach Postgres` on the login screen | Postgres is not running. Start it with `docker compose up -d` and reload the page |
 | `Could not set up your storage, so the account was not created` | Azure refused to create the new user's container or search index (check the Azure values in `.env` and the index limit of your search tier). Nothing was created, so you can try again |
 | `Your session has ended. Log in again.` | Your session was ended elsewhere (you logged out, changed your password or deleted the account on another device) or it expired after 14 days. Log in again |
+| Log line `spaCy model ... is not available` | The spaCy package or its English model is not installed, so names are read by a plain rule and locations stay empty. Run `pip install -r requirements.txt` again (the model comes from a GitHub release URL, so it needs internet access), then restart the app |
 | `Missing 'AZURE_...' in .env` | Lists every empty or missing value at once. Copy `.env.example` to `.env`, fill them in and restart the app |
 | `The index '...' was made by an older version` | The index settings changed (English text analyzer, filterable file names, explicit cosine metric, CV metadata fields, a scoring profile, searchable section headings) and Azure cannot change these in place. Delete the user's index in the Azure portal, restart the app, then open **Manage a CV** and click **Update outdated CVs** to index the stored CVs again |
 | `Could not connect to Azure` at start-up | A value in `.env` is malformed, most often the storage connection string. Copy it again from the portal |

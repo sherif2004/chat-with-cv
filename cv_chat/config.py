@@ -63,5 +63,5 @@ AGENT_MAX_ROUNDS = 5  # tool-using rounds the agent may take for one complex que
 AGENT_MAX_SECONDS = 30  # time budget for those rounds; afterwards it answers from what it has found
 AGENT_CV_CHARS = 12000  # most characters of one CV that get_cv hands to the model
 AGENT_SEARCH_K = 20  # most excerpts one search_cvs call hands to the model
-METADATA_CHARS = 12000  # most characters of a CV read for its metadata (name, title, years, contact)
+NER_MODEL = "en_core_web_sm"  # the spaCy model that finds the candidate's name and location
 MAX_YEARS = 60  # a years-of-experience value above this is treated as wrong
