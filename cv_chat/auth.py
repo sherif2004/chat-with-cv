@@ -65,6 +65,17 @@ def sign_up(email: str, password: str, on_created: Callable[[User], None] | None
     return user
 
 
+def check_password(user_id: str, password: str) -> bool:
+    """True if this is the user's password. For actions that must not rest on a session alone, such as deleting the account."""
+    with db.pool().connection() as conn:
+        row = conn.execute("SELECT password_hash FROM users WHERE id = %s", (user_id,)).fetchone()
+    try:
+        _hasher.verify(row[0] if row else _DUMMY_HASH, password)
+    except VerificationError:
+        return False
+    return row is not None
+
+
 def change_password(user_id: str, current: str, new: str, keep_token: str | None = None) -> None:
     """Set a new password after checking the current one. Every other session of the user is ended; keep_token stays."""
     if len(new) < MIN_PASSWORD:

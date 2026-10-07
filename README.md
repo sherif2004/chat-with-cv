@@ -133,7 +133,7 @@ cp .env.example .env          # DATABASE_URL is already filled in for this setup
 uv run streamlit run app.py
 ```
 
-Passwords are stored as argon2 hashes. A login is a random token in a browser cookie; only its hash is stored in the database, and it expires after 14 days or when you log out. Sign-ups are capped at 15 users, because each user gets their own search index and the Azure Basic tier allows 15.
+Passwords are stored as argon2 hashes. A login is a random token in a browser cookie; only its hash is stored in the database, and it expires after 14 days or when you log out. The session is checked against the database on every page run, so ending it on one device (log out, password change, account deletion) also ends an already-open tab on another device at its next click. Sign-ups are capped at 15 users, because each user gets their own search index and the Azure Basic tier allows 15.
 
 ### Account menu
 
@@ -141,7 +141,7 @@ Your email at the top of the sidebar opens the account menu:
 
 - **Log out** ends this session.
 - **Change password** asks for the current password and logs you out on your other devices.
-- **Delete my account** (you type your email to confirm) deletes your CVs, your search index, your saved chats and your account. Azure data is deleted first: if that fails, nothing else is removed and you can try again. It waits until CVs that are being processed have finished.
+- **Delete my account** (you type your email and enter your password to confirm) deletes your CVs, your search index, your saved chats and your account. Azure data is deleted first: if that fails, nothing else is removed and you can try again. It waits until CVs that are being processed have finished.
 
 ### Chats
 

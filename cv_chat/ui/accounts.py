@@ -45,14 +45,20 @@ def current_user() -> auth.User:
     except Exception as error:
         st.error(f"Could not reach Postgres: {error}. Start it with `docker compose up -d`.", icon=":material/error:")
         st.stop()
+    ended = False
     if user := st.session_state.get("user"):
-        return user
+        if auth.user_for_token(st.session_state.get("token")) == user:  # asked again on every page run, so a session ended elsewhere stops working here
+            return user
+        st.session_state.clear()
+        ended = True
     cookie_token = st.context.cookies.get(COOKIE)
     if user := auth.user_for_token(cookie_token):
         st.session_state["user"], st.session_state["token"] = user, cookie_token
         return user
     screen = st.empty()
     with screen.container():
+        if ended:
+            st.warning("Your session has ended. Log in again.", icon=":material/lock:")
         token = _login_screen()
     if token is None:
         st.stop()
@@ -107,9 +113,13 @@ def account_menu(user: auth.User) -> None:
         st.markdown("**Delete my account**")
         st.caption("This deletes your CVs, your search index, your chats and your account. It cannot be undone.")
         confirm = st.text_input("Type your email to confirm", key="delete_confirm")
+        password = st.text_input("Your password", type="password", key="delete_password")
         if st.button("Delete my account", icon=":material/delete_forever:", type="primary", width="stretch",
-                     disabled=confirm.strip().lower() != user.email):
-            _delete_account(user)
+                     disabled=confirm.strip().lower() != user.email or not password):
+            if auth.check_password(user.id, password):
+                _delete_account(user)
+            else:
+                st.error("Wrong password.")
 
 
 def _delete_account(user: auth.User) -> None:
