@@ -71,6 +71,11 @@ def _nlp():
         return None
 
 
+def warm_up() -> None:
+    """Load the spaCy model now, so the first CV does not wait for it."""
+    _nlp()
+
+
 def _entities(text: str) -> list[tuple[str, str, int, int]]:
     """(text, label, start, end) of the named entities in `text`."""
     nlp = _nlp()

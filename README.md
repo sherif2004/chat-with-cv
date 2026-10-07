@@ -168,6 +168,9 @@ Every answer is saved, like in other chat apps. The sidebar holds only the chats
 
 ### Look and speed
 
+- **Where the time goes.** Start the app with `CV_PROFILE=1` (for example `CV_PROFILE=1 streamlit run app.py`, or `$env:CV_PROFILE=1` first in PowerShell) and the terminal prints one line per page run, such as `page run 1830 ms | login check 4 | imports 1210 | prepare workspace 590 | sidebar 18 | view: Chat 12`. It shows which step is slow on your machine. Without it nothing is measured.
+- **Start-up.** The first page after login no longer waits for Docling to import, and the search index is not re-sent to Azure on every start when it is already complete.
+
 - **Fast clicks.** The list of CVs is kept for a few minutes instead of asking Azure Blob Storage on every click (it refreshes after an upload, a delete, or a re-index). Details panels are built only when you switch **Details** on under an answer, and a long chat first draws its latest 20 messages, with **Load earlier messages** for the rest.
 - **Theme.** The colours come from [.streamlit/config.toml](.streamlit/config.toml), with a light and a dark theme that follow your system setting. The accent colour, the animations and the right-to-left rules are in [cv_chat/ui/styles.css](cv_chat/ui/styles.css).
 - **Animation.** Messages, cards and the welcome screen fade up when they appear, buttons and cards respond when you hover or press them, and the login page eases in. If your system is set to reduce motion, all animation is switched off.
@@ -377,7 +380,7 @@ The search index settings (text analyzer `en.microsoft`, field weights, boosted 
 - **Same CV under a different file name counts as a different CV.** `cv.pdf` and `cv (1).pdf` are stored separately.
 - **After changing extraction or chunking code or settings**, click **Update outdated CVs** (in the Library), or **Process CVs** with the files again. The change is detected automatically and the CVs are re-indexed, even though the files are unchanged; CVs already up to date are skipped. (Any edit to `extract.py`, `chunking.py`, `sections.py` or `entities.py`, even a comment, counts as a change.)
 - **Using an index from an older version of the app:** delete it in the Azure portal (each user's index is named `<AZURE_SEARCH_INDEX>-<user id>`) and process the CVs again. Azure cannot change an analyzer, a field's filterable flag or the vector metric on an existing index, so the app stops at start-up with a message that names what is outdated. After recreating it, click **Update outdated CVs** to index the stored CVs again.
-- **The first CV is slow.** Docling loads its layout models on first use. After that, extraction takes a few seconds per CV on CPU. A GPU (`DOCLING_DEVICE = "cuda"`) is much faster.
+- **The first CV used to be slow; now the wait is hidden.** Docling and PyTorch take many seconds to load, so they are not loaded when the app starts (the login and chat pages open without them), and they are loaded in the background the first time you open the **Library**. By the time you have picked your files they are usually ready. After that, extraction takes a few seconds per CV on CPU. A GPU (`DOCLING_DEVICE = "cuda"`) is much faster.
 - **Delete is permanent.** It removes the original file from Blob Storage and the CV from the index.
 - **Scanned PDFs go through OCR**, which is slower than reading a text PDF. A PDF with no readable text at all is reported as "No text found".
 - **DOCX files have no page numbers**, so their chunks are stored as page 1.

@@ -13,11 +13,8 @@ from dataclasses import dataclass
 # Must be set before torch is imported.
 os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
-from docling.datamodel.base_models import DocumentStream
-from docling.datamodel.pipeline_options import AcceleratorOptions, PdfPipelineOptions
-from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling_core.types.doc import DocItemLabel, TableItem
-from docling.datamodel.base_models import InputFormat
+# Docling (and PyTorch behind it) takes many seconds to import, so it is imported inside the functions that need it:
+# the app starts and answers questions without it, and only reading a CV loads it.
 
 from cv_chat import config
 
@@ -34,13 +31,19 @@ class ExtractedCV:
 
 
 _lock = threading.Lock()  # the layout models are not thread-safe: one conversion at a time
-_converter: DocumentConverter | None = None
+_lock_for_flag = threading.Lock()
+_converter = None  # a docling DocumentConverter, once loaded
+_warm_up_started = False
 
 
-def _get_converter() -> DocumentConverter:
+def _get_converter():
     """Loaded on first use (the first call downloads/loads the models). Call with _lock held."""
     global _converter
     if _converter is None:
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import AcceleratorOptions, PdfPipelineOptions
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+
         options = PdfPipelineOptions(
             do_ocr=True,  # scanned PDFs and text inside images
             accelerator_options=AcceleratorOptions(device=config.DOCLING_DEVICE),
@@ -71,7 +74,33 @@ def extract_cv(file_name: str, data: bytes) -> ExtractedCV:
     return extracted
 
 
+def warm_up_in_background() -> None:
+    """Start loading Docling and its models in a background thread, once per process, so the first CV does not wait for them.
+    Called when the Library is first opened; people who only chat never pay for it."""
+    global _warm_up_started
+    with _lock_for_flag:
+        if _warm_up_started:
+            return
+        _warm_up_started = True
+    threading.Thread(target=_warm_up, name="docling-warm-up", daemon=True).start()
+
+
+def _warm_up() -> None:
+    try:
+        from cv_chat.processing import entities
+
+        entities.warm_up()  # the spaCy model (about a second)
+        with _lock:
+            _get_converter()
+        log.info("docling is loaded")
+    except Exception as error:  # the first CV will try again and report the real problem
+        log.warning("could not preload docling: %s", str(error).splitlines()[0] if str(error) else type(error).__name__)
+
+
 def _convert(file_name: str, data: bytes) -> ExtractedCV:
+    from docling.datamodel.base_models import DocumentStream
+    from docling_core.types.doc import DocItemLabel, TableItem
+
     with _lock:
         document = _get_converter().convert(DocumentStream(name=file_name, stream=io.BytesIO(data))).document
 

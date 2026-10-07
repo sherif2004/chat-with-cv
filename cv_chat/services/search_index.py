@@ -82,6 +82,13 @@ def _outdated_settings(index: SearchIndex) -> list[str]:
     return problems
 
 
+def _is_complete(index: SearchIndex, wanted_fields: set[str]) -> bool:
+    """True if the index already has every field and the semantic configuration, so updating it would change nothing."""
+    have = {field.name for field in index.fields}
+    configurations = index.semantic_search.configurations if index.semantic_search else []
+    return wanted_fields <= have and any(c.name == SEMANTIC_CONFIG for c in configurations or [])
+
+
 def ensure_index(ws: Workspace, dimensions: int) -> None:
     """Create the index (vectors of the given length), or update it in place if it already exists."""
     existing = _existing_index(ws)
@@ -122,6 +129,8 @@ def ensure_index(ws: Workspace, dimensions: int) -> None:
             vector_search_profile_name="default",
         ),
     ]
+    if existing is not None and _is_complete(existing, {field.name for field in fields}):
+        return  # already has every field and the semantic settings: skip the update call (one Azure round trip per start)
     vector_search = VectorSearch(
         algorithms=[HnswAlgorithmConfiguration(name="hnsw", parameters=HnswParameters(metric="cosine"))],
         profiles=[VectorSearchProfile(name="default", algorithm_configuration_name="hnsw")],

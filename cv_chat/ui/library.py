@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from cv_chat import config
+from cv_chat.processing import extract
 from cv_chat.rag import ingest, jobs
 from cv_chat.services import blob_storage
 from cv_chat.ui import candidates, states
@@ -33,6 +34,7 @@ def cv_names(ws: Workspace) -> list[str]:
 
 
 def render(ws: Workspace, cvs: list[str]) -> None:
+    extract.warm_up_in_background()  # people who open the Library are about to process CVs: load the models meanwhile
     st.markdown("#### Library")
     st.caption(f"{len(cvs)} CV{'' if len(cvs) == 1 else 's'} indexed · at least {config.MIN_CVS} are needed to chat")
 
