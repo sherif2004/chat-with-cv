@@ -227,13 +227,55 @@ def _phone(text: str) -> str:
     return ""
 
 
+_CONTACT_SIGNAL = re.compile(r"@|https?://|www\.|linkedin|github", re.I)
+_SEGMENT_SPLIT = re.compile(r"\s*[|·•●▪◦]\s*|\s+[–—-]\s+|\s{3,}")
+_PLACE_LABEL = re.compile(r"(?i)^\s*(?:address|location|based in|city|country)\s*[:\-]\s*(.+)$")
+_PLACE_PART = re.compile(r"[A-Z][A-Za-z.'’-]*(?: [A-Z][A-Za-z.'’-]*){0,2}")
+_COUNTRY_CODES = {"US", "USA", "UK", "UAE", "KSA", "EU", "UN"}  # short all-capital places that are real; others (AI, ML, IT...) are not
+
+
+def _is_real_place(text: str) -> bool:
+    """False for 2 or 3 capital letters that are not a known country code: the small spaCy model tags "AI" or "QA" as places."""
+    return not (text.isupper() and len(text) <= 3 and text not in _COUNTRY_CODES)
+
+
+def _place_from_segment(segment: str) -> str:
+    """A written place such as "Cairo, Egypt" or "Berlin", from one piece of a contact line. "" if it is something else."""
+    segment = segment.strip(" ,;:")
+    if not segment or re.search(r"[\d@/\\]|\.(?:com|net|org|io|dev)\b", segment):
+        return ""
+    parts = [part.strip() for part in segment.split(",")]
+    if not 1 <= len(parts) <= 4 or not all(_PLACE_PART.fullmatch(part) for part in parts):
+        return ""
+    if _nlp() is not None:  # a skill list such as "Python, SQL" looks the same: at least one part must be a place
+        if not any(label in ("GPE", "LOC") for _, label, _, _ in _entities(segment)):
+            return ""
+    elif len(parts) < 2:
+        return ""  # without the model only a pair like "Cairo, Egypt" is trusted
+    return _clean(", ".join(parts), 100)
+
+
+def _location_from_contact(lines: list[str]) -> str:
+    """The place written on the contact line (the line with the email, phone or links), wherever it is on the page: in many
+    CVs it sits at the bottom, far from the top. Also understands "Address: ..." and "Location: ..." lines."""
+    for line in lines:
+        if label := _PLACE_LABEL.match(line):
+            if place := _place_from_segment(label.group(1)):
+                return place
+        if _CONTACT_SIGNAL.search(line) or _phone(line):
+            for segment in _SEGMENT_SPLIT.split(line):
+                if place := _place_from_segment(segment):
+                    return place
+    return ""
+
+
 def _location(text: str, entities: list[tuple[str, str, int, int]]) -> str:
-    """The first place named at the top, with the place right after it when they are written as "City, Country"."""
-    places = [(t, s, e) for t, label, s, e in entities if label == "GPE"]
+    """The first place spaCy names at the top, with the place right after it when they are written as "City, Country"."""
+    places = [(t, s, e) for t, label, s, e in entities if label == "GPE" and _is_real_place(t)]
     for index, (first, _, end) in enumerate(places):
         parts = [first]
         for nxt, nxt_start, nxt_end in places[index + 1 :]:
-            if text[end:nxt_start].strip() == ",":
+            if text[end:nxt_start].strip() == "," and _is_real_place(nxt):
                 parts.append(nxt)
                 end = nxt_end
             else:
@@ -279,26 +321,95 @@ def _month_index(text: str, today: date) -> tuple[int, bool] | None:
     return year * 12 + 7, False  # only a year was written: assume the middle of it
 
 
-def _years(text: str, today: date) -> float | None:
-    """Time covered by the dated ranges in `text`, overlaps counted once. Falls back to a stated "N years of experience"."""
+_WORK_WORDS = re.compile(
+    r"\b(?:intern|interns|internship|engineer|developer|programmer|analyst|instructor|trainer|tutor|teacher|assistant|agent|manager|"
+    r"officer|consultant|freelance|freelancer|specialist|designer|administrator|technician|coordinator|supervisor|associate|"
+    r"executive|employee|full[- ]time|part[- ]time|contract)\b", re.I,
+)
+_EDU_WORDS = re.compile(
+    r"\b(?:university|college|faculty|school|bachelor|bachelors|b\.?sc\.?|m\.?sc\.?|degree|gpa|cgpa|graduat\w*|undergraduate|"
+    r"postgraduate|diploma|thesis|major|student)\b", re.I,
+)
+_TRAIN_WORDS = re.compile(
+    r"\b(?:bootcamp|boot camp|course|courses|training|program|programme|academy|initiative|scholarship|workshop|certification|"
+    r"certificate|learning|camp|institute|nanodegree|level \d)\b", re.I,
+)
+
+
+def _evidence(context: str) -> tuple[int, int, int]:
+    """How many different education, training and work words are in the text around a date range."""
+    return tuple(len({m.lower() for m in rx.findall(context)}) for rx in (_EDU_WORDS, _TRAIN_WORDS, _WORK_WORDS))
+
+
+def _kind(context: str) -> str:
+    """What a date range is for, judged by the words around it: "edu" (a degree), "train" (a course or training program),
+    "work" (a job or internship), or "" when nothing says. Only jobs and internships count as experience."""
+    edu, train, work = _evidence(context)
+    if edu and edu >= work:
+        return "edu"
+    if train > work:
+        return "train"
+    return "work" if work else ""
+
+
+def _spans(ranges: list[tuple[str, str]], today: date) -> list[tuple[int, int]]:
+    """Month spans (start, end) for date ranges written as text, leaving out any that make no sense."""
     spans = []
-    for start_text, end_text in _RANGE.findall(text):
+    for start_text, end_text in ranges:
         start, end = _month_index(start_text, today), _month_index(end_text, today)
         if start is None or end is None or start[0] // 12 < 1950:
             continue
         low, high = start[0], end[0] + (1 if start[1] and end[1] else 0)  # Jan 2018 to Dec 2018 is twelve months
         if low < high <= today.year * 12 + today.month + 1 and high - low <= 50 * 12:
             spans.append((low, high))
-    spans.sort()
+    return spans
+
+
+def _counted_ranges(chunks: list[Chunk]) -> list[tuple[str, str]]:
+    """The date ranges that are work. In an Experience section a range counts unless the lines around it say it is a degree
+    or a course. Anywhere else it counts only if the lines around it name a job or an internship. Education, certification,
+    language and contact sections are skipped, and so are projects and training programs."""
+    counted = []
+    for chunk in chunks:
+        kind = section_type(chunk.section)
+        if kind in SKIPPED_FOR_YEARS:
+            continue
+        in_experience = kind == "experience"
+        lines = chunk.text.splitlines()
+        for index, line in enumerate(lines):
+            found = _RANGE.findall(line)
+            if not found:
+                continue
+            around = "\n".join(lines[max(0, index - 1) : index + 1] if in_experience else lines[max(0, index - 2) : index + 3])
+            if in_experience:
+                if _kind(around) in ("work", ""):
+                    counted += found
+                continue
+            # Outside an Experience section the words must clearly say job: more work words than training words, and a range
+            # of more than three years (which is much more likely a degree) needs two different work words.
+            edu, train, work = _evidence(around)
+            for start, end in found:
+                span = _spans([(start, end)], date.today())
+                long_range = bool(span) and span[0][1] - span[0][0] > 36
+                if not edu and work > train and (work >= 2 or not long_range):
+                    counted.append((start, end))
+    return counted
+
+
+def _years(chunks: list[Chunk], full_text: str, today: date) -> float | None:
+    """Years of work: the time covered by the job and internship date ranges, overlaps counted once. Falls back to a stated
+    "N years of experience" when no dated job is found."""
+    ranges = _counted_ranges(chunks) if chunks else _RANGE.findall(full_text)
+    spans = sorted(_spans(ranges, today))
     months, reach = 0, None
     for low, high in spans:
         if reach is None or low > reach:
             months, reach = months + (high - low), high
         elif high > reach:
             months, reach = months + (high - reach), high
-    years = round(months / 12, 1) if months else None
+    years = int(months / 12 * 10 + 0.5) / 10 if months else None  # rounded half up: three months is 0.3 years, not 0.2
     if years is None:
-        stated = [int(n) for n in _STATED.findall(text)]
+        stated = [int(n) for n in _STATED.findall(full_text)]
         years = float(max(stated)) if stated else None
     return years if years is not None and 0 < years <= config.MAX_YEARS else None
 
@@ -315,6 +426,7 @@ def extract(pages: list[tuple[int, str]], chunks: list[Chunk], today: date | Non
 def _extract(pages: list[tuple[int, str]], chunks: list[Chunk], today: date, file_name: str = "") -> dict:
     first_page = pages[0][1] if pages else ""
     lines = [" ".join(line.split()) for line in first_page.splitlines() if line.strip()][:HEADER_LINES]
+    page_lines = [" ".join(line.split()) for line in first_page.splitlines() if line.strip()][:HEADER_LINES * 8]  # the first page, not only its top
     header, offsets = "", []
     for line in lines:  # the top of the CV as one text, remembering where each line starts
         offsets.append(len(header))
@@ -331,16 +443,13 @@ def _extract(pages: list[tuple[int, str]], chunks: list[Chunk], today: date, fil
         name, name_index = email_name or file_name_name, -1  # a name a few lines down that the email or file name contradicts is probably not the owner
     if not name:  # the name is not in the first lines: look further, with the email address and file name as a check
         name = _name_elsewhere(pages, email_name, email_letters, file_name_name, file_letters)
-    experience_chunks = [c for c in chunks if section_type(c.section) == "experience"]
-    dated_chunks = experience_chunks or [c for c in chunks if section_type(c.section) not in SKIPPED_FOR_YEARS]
-    experience_lines = [line for c in experience_chunks for line in c.text.splitlines()[1:]]  # [1:] skips the heading
-    dated_text = "\n".join(c.text for c in dated_chunks) if chunks else full_text
+    experience_lines = [line for c in chunks if section_type(c.section) == "experience" for line in c.text.splitlines()[1:]]  # [1:] skips the heading
 
     return {
         "candidate_name": name,
         "job_title": _job_title(lines, name_index, experience_lines),
-        "years_experience": _years(dated_text, today),
+        "years_experience": _years(chunks, full_text, today),
         "email": _clean(email.group(), 100) if email else "",
         "phone": _phone(header) or _phone(full_text),
-        "location": _location(header, entities),
+        "location": _location_from_contact(page_lines) or _location(header, entities),
     }
