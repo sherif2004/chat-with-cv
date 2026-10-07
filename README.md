@@ -40,6 +40,7 @@ Every answer comes from the uploaded CVs, is written in the language you asked i
 | 2. Process | Click **Process CVs** | Reads each CV's layout, splits it by section and makes it searchable, several CVs at the same time. CVs that are already indexed and unchanged are skipped |
 | 3. Ask | Type a question in the chat, in any language | Works out what kind of question it is, finds the relevant parts of the CVs (or plans several searches for a complex question) and streams an answer in your language, with `[file, p.N]` citations |
 | 4. Check | Open **Sources** or **Details** under an answer | Sources: which CVs, and which excerpts, the answer used. Details: how the question was routed, what was searched, and where the time went |
+| 5. Browse | Switch to **Candidates**, or reopen an earlier chat from the sidebar | Shows each CV as a card (name, title, years, location) with filters, and keeps every chat you had |
 
 The three required Azure services each have one job:
 
@@ -104,7 +105,7 @@ flowchart TD
    - *vector search* finds chunks with a similar meaning, even if the words differ ("cloud" finds "Azure").
 
    A scoring profile makes a keyword match in the candidate name or job title count more than the same words in the body text, and favours the *experience* and *skills* sections. When sections were picked, only those sections are searched. If fewer than 3 chunks match (some CVs use unusual headings), it searches everything instead.
-5. **Semantic re-ranking.** Azure's semantic ranker reads the question and each of the top 30 candidates and re-orders them by how well they answer it. It also returns the most relevant passage of each chunk, which the Sources list shows.
+5. **Semantic re-ranking.** Azure's semantic ranker reads the question and each of the top 50 candidates and gives each a relevance score, then re-orders them by how well they answer it. It also returns the most relevant passage of each chunk, which the Sources list shows.
 6. **Keep what is relevant (top-p).** The search returns up to 50 chunks with the ranker's relevance score. They are grouped by CV, and a CV counts as relevant as its best chunk. Instead of a fixed number, the best CVs are kept until they hold 80% of the relevance (`TOP_P`), then the same is done for the excerpts inside each kept CV. Each score's share is its softmax, so a clear winner takes most of it and a close field shares it. A question about one person therefore sends one or two CVs, and a broad question such as "who knows Python?" sends many. `MAX_CVS` and `MAX_CHUNKS_PER_CV` only cap the extreme case where every score is the same. A CV's excerpts stay together, in reading order, with the best CV first.
 7. **Ask the chat model.** It receives the excerpts (each labelled with CV, section and page, and the first one of every CV with a line about the candidate: name, title, years, contact), the question and the last few chat messages. It is told to answer only from the excerpts, to cite `[file name, p.N]`, to answer in the language of the question, and to say so when the answer is not there. The answer streams into the chat as it is written.
 8. **Complex questions go to the agent** instead of steps 2 to 7. It can list all CVs with their name, title and years of experience, search (optionally limited to some CVs or filtered by years and job title) and read a whole CV. Its steps appear in the status box while it works.
@@ -135,6 +136,11 @@ streamlit run app.py
 
 Passwords are stored as argon2 hashes. A login is a random token in a browser cookie; only its hash is stored in the database, and it expires after 14 days or when you log out. The session is checked against the database on every page run, so ending it on one device (log out, password change, account deletion) also ends an already-open tab on another device at its next click. Sign-ups are capped at 15 users, because each user gets their own search index and the Azure Basic tier allows 15.
 
+Two things to change before the app is reachable from anywhere but your own machine:
+
+- The session cookie is written by a small script in the page, so it is not marked `HttpOnly` or `Secure`. Serve the app over HTTPS.
+- The Docker Postgres uses the password `cvchat` and listens only on `127.0.0.1`. Change the password in `docker-compose.yml` and `DATABASE_URL` if it is ever exposed.
+
 ### Account menu
 
 Your email at the top of the sidebar opens the account menu:
@@ -155,9 +161,8 @@ The **Candidates** switch above the chat shows one card per CV with the name, jo
 
 Signing up creates the user's own Blob container (`<AZURE_STORAGE_CONTAINER>-<user id>`) and their own Azure AI Search index (`<AZURE_SEARCH_INDEX>-<user id>`). If either cannot be created, the account is not created either. The two `.env` values are therefore **prefixes** now.
 
-Every call that touches Azure takes the logged-in user's workspace as an argument, and the workspace is built only from that user's id, so a user's code cannot reach another user's CVs. The answer cache and the ingest queue are per user as well. Because each user needs a search index and Azure AI Search allows only a limited number per service (15 on the Basic tier), sign-ups are capped at 15.
-
-CVs uploaded before this change stay in the old shared container and index (the plain prefix names) and are not moved to any user. Re-upload them from a user account, then delete the old container and index in the Azure portal when you no longer need them.
+Every call that touches Azure takes the logged-in user's workspace as an argument, and the workspace is built only from that user's id, so a user's code cannot reach another user's CVs. The answer cache and the ingest queue are per user as well. 
+If you used an older version of the app, its CVs are in the old shared container and index (the plain prefix names). They are not moved to any user: re-upload them from a user account, then delete the old container and index in the Azure portal.
 
 ### Links to the original CVs
 
@@ -345,19 +350,19 @@ The search index settings (text analyzer `en.microsoft`, field weights, boosted 
 - **Uploading the same file again is cheap.** If the content has not changed it is skipped. If it has, its chunks are replaced and any leftover chunks from the old version are deleted.
 - **Same CV under a different file name counts as a different CV.** `cv.pdf` and `cv (1).pdf` are stored separately.
 - **After changing extraction or chunking code or settings**, click **Update outdated CVs** (under **Manage a CV**), or **Process CVs** with the files again. The change is detected automatically and the CVs are re-indexed, even though the files are unchanged; CVs already up to date are skipped. (Any edit to `extract.py`, `chunking.py`, `sections.py` or `metadata.py`, even a comment, counts as a change.)
-- **Using an index from an older version of the app:** delete it in the Azure portal (or set a new `AZURE_SEARCH_INDEX` name) and process the CVs again. Azure cannot change an analyzer, a field's filterable flag or the vector metric on an existing index, so the app stops at start-up with a message that names what is outdated. After recreating it, click **Update outdated CVs** to index the stored CVs again.
+- **Using an index from an older version of the app:** delete it in the Azure portal (each user's index is named `<AZURE_SEARCH_INDEX>-<user id>`) and process the CVs again. Azure cannot change an analyzer, a field's filterable flag or the vector metric on an existing index, so the app stops at start-up with a message that names what is outdated. After recreating it, click **Update outdated CVs** to index the stored CVs again.
 - **The first CV is slow.** Docling loads its layout models on first use. After that, extraction takes a few seconds per CV on CPU. A GPU (`DOCLING_DEVICE = "cuda"`) is much faster.
 - **Delete is permanent.** It removes the original file from Blob Storage and the CV from the index.
 - **Scanned PDFs go through OCR**, which is slower than reading a text PDF. A PDF with no readable text at all is reported as "No text found".
 - **DOCX files have no page numbers**, so their chunks are stored as page 1.
 - **Every question makes a router call** before the search, which adds a little time before the answer starts streaming. Query expansion adds one more call and two more searches. A complex question can take several model calls, often 10 to 30 seconds.
-- **Simple questions** reach at most 10 chunks, 2 per CV, so a question about a large pile of CVs may not cover every one. That is what the agent is for.
+- **Simple questions send only the relevant CVs** (top-p, at most `MAX_CVS` CVs and `MAX_CHUNKS_PER_CV` excerpts each), so a question about a large pile of CVs may not cover every one. That is what the agent is for.
 - **The search is built for English CVs.** The keyword analyzer is English, and the router writes the search query in English. Questions can be in any language, but CVs in another language would need another analyzer and a new index.
 - **Years of experience are an estimate** read by a model from the dated jobs ("Present" counts as today). A CV whose years could not be read never matches a years filter.
 - **Contact details are personal data.** Email, phone and location are stored as fields in the search index, next to the CV text. Anyone with the search key can read them.
-- **There is no login.** Anyone who can open the app sees every CV. Put it behind your own authentication before using real candidate data.
-- **The caches live in the memory of the app process.** They are empty after a restart and are not shared between several copies of the app, but every browser session of one running app shares them. Entries that depend on a conversation (router results, final answers) include the recent chat in their key, so only an identical conversation can reuse them.
-- **The embedding size is read from your embedding model** when the index is first created, and cannot be changed on an existing index. To switch to a model with a different size, delete the index in the Azure portal (or set a new `AZURE_SEARCH_INDEX` name) and process the CVs again.
+- **Each user sees only their own CVs and chats.** Sign-up is open to anyone who can reach the app (until the 15-user cap), so put the app behind your own access control, and HTTPS, before using real candidate data.
+- **The caches live in the memory of the app process.** They are empty after a restart and are not shared between several copies of the app. Each user has their own cache, shared by that user's browser sessions. Entries that depend on a conversation (router results, final answers) include the recent chat in their key, so only an identical conversation can reuse them.
+- **The embedding size is read from your embedding model** when the index is first created, and cannot be changed on an existing index. To switch to a model with a different size, delete each user's index in the Azure portal and process the CVs again.
 - **Restart Streamlit after editing `.env`.** The file is read once at startup.
 
 ---
@@ -387,7 +392,7 @@ The reasoning, limits and costs behind each part of the chat side.
 - It plans its searches, retries with different wording and answers only from what the tools returned. Its steps are shown while it works, and its answer streams.
 - Limits: at most 5 rounds and about 30 seconds. When the budget is used up it answers from what it has found. If the agent fails it falls back to a single search.
 - There is no location filter: the location field is stored but not filterable in the index.
-- *Why:* ranking or counting needs more than the 10 best chunks, for example "who has the most experience?".
+- *Why:* ranking or counting needs more than the few best chunks, for example "who has the most experience?".
 - *Cost:* several model calls, often 10 to 30 seconds per complex question. Simple questions are not affected.
 
 ### Caching
@@ -396,7 +401,7 @@ The reasoning, limits and costs behind each part of the chat side.
 - **Chat replies** to such messages are cached by their text alone (always on), so saying "hi" again makes no model call at all. These replies are written without the chat history, so nothing from one conversation can reach another.
 - **Search results** are cached per query, section filter and CV filter, so repeats skip the searches and do not use the semantic ranker quota again.
 - **Final answers** can optionally be cached too, only for an identical question with identical chat history (sidebar switch, off by default).
-- **Invalidation.** The whole cache is cleared whenever a CV is processed, re-indexed or deleted, so answers never cite a CV that was removed or changed. A result computed while a CV was changing is not stored. **Clear cache** in the sidebar clears it by hand.
+- **Invalidation.** The whole cache is cleared whenever a CV is processed, re-indexed or deleted, so answers never cite a CV that was removed or changed. A result computed while a CV was changing is not stored. **Clear cache** in the sidebar clears your own cache by hand.
 - The cache is in memory, per app process. The in-memory cache of query embeddings (`EMBED_CACHE_SIZE`) is separate.
 
 ### Search boosts and CV metadata
@@ -420,7 +425,7 @@ CV text is written by third parties and is treated as data, not as instructions:
 
 Every answer records a trace: the router result, query expansion, each search (cached or not, with its filters), each agent round and tool call, the wait before the model's first word, and the time to write the answer. The **Details** dropdown shows it. Searches that run in parallel overlap, so the shares in the timeline can add up to more than 100%.
 
-What stays as it is: the section filter, the limit of 2 chunks per CV for simple questions, streamed answers, and delete and re-index.
+What stays as it is: the section filter, streamed answers, and delete and re-index.
 
 ---
 
@@ -432,11 +437,12 @@ Most problems now show a message that says what to check. These are the ones you
 |---|---|
 | `Could not reach Postgres` on the login screen | Postgres is not running. Start it with `docker compose up -d` and reload the page |
 | `Could not set up your storage, so the account was not created` | Azure refused to create the new user's container or search index (check the Azure values in `.env` and the index limit of your search tier). Nothing was created, so you can try again |
+| `Your session has ended. Log in again.` | Your session was ended elsewhere (you logged out, changed your password or deleted the account on another device) or it expired after 14 days. Log in again |
 | `Missing 'AZURE_...' in .env` | Lists every empty or missing value at once. Copy `.env.example` to `.env`, fill them in and restart the app |
-| `The index '...' was made by an older version` | The index settings changed (English text analyzer, filterable file names, explicit cosine metric, CV metadata fields, a scoring profile, searchable section headings) and Azure cannot change these in place. Delete the index in the Azure portal, or set a new `AZURE_SEARCH_INDEX` in `.env`, restart the app, then open **Manage a CV** and click **Update outdated CVs** to index the stored CVs again |
+| `The index '...' was made by an older version` | The index settings changed (English text analyzer, filterable file names, explicit cosine metric, CV metadata fields, a scoring profile, searchable section headings) and Azure cannot change these in place. Delete the user's index in the Azure portal, restart the app, then open **Manage a CV** and click **Update outdated CVs** to index the stored CVs again |
 | `Could not connect to Azure` at start-up | A value in `.env` is malformed, most often the storage connection string. Copy it again from the portal |
 | `Azure OpenAI has no deployment named '...'` | Use the **deployment name** (not the model name) exactly as in the portal. The endpoint is cleaned up for you (a trailing `/openai/v1` is removed), but the API version must look like `2024-10-21` |
-| `The index '...' stores vectors of length N` | The index was created with another embedding model. Delete the index in the Azure portal or set a new `AZURE_SEARCH_INDEX`, then process the CVs again |
+| `The index '...' stores vectors of length N` | The index was created with another embedding model. Delete the index in the Azure portal, then process the CVs again |
 | `Could not prepare the search index: ... older version` | See the row above: delete the index (or use a new name), restart, and click **Update outdated CVs** |
 | A note says excerpts from a CV *were left out because Azure's content safety filter flagged them* | Azure's jailbreak detection saw something that looks like an instruction in that CV's text. The answer used the other excerpts. Check the CV; the app keeps working |
 | `Could not answer: ...` under a question | The model call failed (a wrong deployment name, a rate limit, a network error). The message says why. Try again, or lower `MAX_WORKERS` if it happens during an upload |
@@ -446,7 +452,6 @@ Most problems now show a message that says what to check. These are the ones you
 | The chat input is disabled | By design: fewer than 8 CVs are in Azure |
 
 If the search service has no semantic ranker (Free tier, or it is switched off), the app does not fail: it logs a warning and answers with plain hybrid search. Answers are less precisely ranked and Sources show the start of each chunk instead of the best passage.
-
 
 ---
 
