@@ -5,6 +5,7 @@ import streamlit as st
 
 from cv_chat import config
 from cv_chat.rag import qa
+from cv_chat.services import blob_storage
 from cv_chat.ui import details, safe
 from cv_chat.workspace import Workspace
 
@@ -30,7 +31,7 @@ def render(ws: Workspace, has_cvs: bool) -> None:
     if not st.session_state.messages and not question:
         _welcome(has_cvs)
     for message in st.session_state.messages:
-        _show(message)
+        _show(ws, message)
     if question:
         _answer(ws, question)
 
@@ -62,19 +63,19 @@ def _suggest(question: str) -> None:
     st.session_state.suggested_question = question
 
 
-def _show(message: dict) -> None:
+def _show(ws: Workspace, message: dict) -> None:
     with st.chat_message(message["role"], avatar=AVATARS[message["role"]]):
         st.markdown(message["content"])
         if message.get("trace"):
             details.render(message["trace"], message.get("sources", []))
         else:
             _route_note(message.get("route"))
-        _sources(message.get("sources", []))
+        _sources(ws, message.get("sources", []))
 
 
 def _answer(ws: Workspace, question: str) -> None:
     history = list(st.session_state.messages)
-    _show({"role": "user", "content": question})
+    _show(ws, {"role": "user", "content": question})
     with st.chat_message("assistant", avatar=AVATARS["assistant"]):
         try:
             with st.status("Reading your question...", expanded=True) as status:
@@ -90,7 +91,7 @@ def _answer(ws: Workspace, question: str) -> None:
             return
         record = trace.to_dict()  # complete now that the answer has been written
         details.render(record, sources)
-        _sources(sources)
+        _sources(ws, sources)
     st.session_state.messages += [
         {"role": "user", "content": question},
         {"role": "assistant", "content": answer, "sources": sources, "route": route, "trace": record},
@@ -102,7 +103,7 @@ def _route_note(route: str | None) -> None:
         st.caption(f":material/alt_route: {ROUTE_NOTES[route]}")
 
 
-def _sources(sources: list[dict]) -> None:
+def _sources(ws: Workspace, sources: list[dict]) -> None:
     """List the CVs an answer was based on, with a short excerpt from each."""
     if not sources:
         return
@@ -111,6 +112,16 @@ def _sources(sources: list[dict]) -> None:
         excerpts.setdefault(source["file_name"], []).append(source.get("caption") or source["content"])
     with st.expander(f"Sources · {len(excerpts)} CV{'' if len(excerpts) == 1 else 's'}", icon=":material/menu_book:"):
         for file_name, contents in excerpts.items():
-            st.markdown(f":material/description: **{safe.esc(file_name)}** · {len(contents)} excerpt{'' if len(contents) == 1 else 's'}")
+            link = _link(ws, file_name)
+            title = f"[{safe.esc(file_name)}]({link})" if link else safe.esc(file_name)
+            st.markdown(f":material/description: **{title}** · {len(contents)} excerpt{'' if len(contents) == 1 else 's'}")
             snippet = " ".join(contents[0].split())
             st.caption(safe.esc(snippet[:240]) + ("..." if len(snippet) > 240 else ""))
+
+
+def _link(ws: Workspace, file_name: str) -> str | None:
+    """A one-hour link to the user's own copy of the CV, or None if it cannot be made. Never built from index data."""
+    try:
+        return blob_storage.read_link(ws, file_name)
+    except Exception:  # a missing link must never break the answer
+        return None

@@ -18,10 +18,24 @@ from cv_chat.services import blob_storage, openai_service, search_index
 from cv_chat.workspace import Workspace
 
 
+INDEX_VERSION = 2  # bump when the stored chunk fields change: older CVs then show up as outdated and are re-indexed
+MAX_NAME_LENGTH = 200
+
+
+def validate_file_name(file_name: str) -> None:
+    """Upload names come from the browser, so refuse anything that is not a plain file name. Raises ValueError."""
+    if not file_name or not file_name.strip() or len(file_name) > MAX_NAME_LENGTH:
+        raise ValueError(f"The file name must be 1 to {MAX_NAME_LENGTH} characters.")
+    if "/" in file_name or "\\" in file_name or file_name.strip() in (".", ".."):
+        raise ValueError("The file name must not contain / or \\ or be . or ..")
+    if any(ord(char) < 32 or ord(char) == 127 for char in file_name):
+        raise ValueError("The file name must not contain control characters.")
+
+
 @lru_cache(maxsize=1)
 def _pipeline_fingerprint() -> bytes:
     """Changes whenever the extraction or chunking code or its settings change, so those CVs get re-indexed by themselves."""
-    digest = hashlib.md5(f"{config.CHUNK_SIZE}/{config.CHUNK_OVERLAP}".encode())
+    digest = hashlib.md5(f"{config.CHUNK_SIZE}/{config.CHUNK_OVERLAP}/{INDEX_VERSION}".encode())
     for module in (extract, chunking, sections, metadata):
         digest.update(Path(module.__file__).read_bytes())
     return digest.digest()
@@ -39,6 +53,7 @@ def process_cv(
 
     on_stage is told what the CV is doing, for the live status in the sidebar.
     """
+    validate_file_name(file_name)
     file_id = file_id_for(file_name)
     content_hash = hashlib.md5(data + _pipeline_fingerprint()).hexdigest()
     if not force and search_index.get_hash(ws, file_id) == content_hash:
@@ -57,9 +72,10 @@ def process_cv(
     who = f"\nCandidate: {meta['candidate_name']}, {meta['job_title']}" if meta["candidate_name"] else ""
     vectors = openai_service.embed([f"CV: {file_name}{who}\n{chunk.text}" for chunk in chunks])
 
+    file_url = blob_storage.blob_url(ws, file_name)
     docs = [
         {
-            "id": f"{file_id}-{i}", "file_id": file_id, "file_name": file_name,
+            "id": f"{file_id}-{i}", "file_id": file_id, "file_name": file_name, "file_url": file_url,
             "section": chunk.section, "section_type": section_type(chunk.section), "page": chunk.page,
             "content": chunk.text, "content_hash": content_hash, "content_vector": vector, **meta,
         }

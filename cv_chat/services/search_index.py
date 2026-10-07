@@ -101,6 +101,7 @@ def ensure_index(ws: Workspace, dimensions: int) -> None:
     fields = [
         SimpleField(name="id", type=SearchFieldDataType.String, key=True),
         SimpleField(name="file_id", type=SearchFieldDataType.String, filterable=True),
+        SimpleField(name="file_url", type=SearchFieldDataType.String),  # plain Blob address of the original file
         SearchableField(name="file_name", filterable=True),  # keyword search also matches names in file names
         SearchableField(name="section", filterable=True, facetable=True),  # headings are searchable and weighted too
         SimpleField(name="section_type", type=SearchFieldDataType.String, filterable=True),
@@ -208,11 +209,11 @@ def delete_chunks(ws: Workspace, ids: list[str]) -> None:
 def get_cv_chunks(ws: Workspace, file_id: str) -> list[dict]:
     """Every chunk of one CV in reading order."""
     results = _client(ws).search(
-        "*", filter=f"file_id eq '{file_id}'", select=["id", "file_name", "section", "page", "content", *META_FIELDS], top=1000
+        "*", filter=f"file_id eq '{file_id}'", select=["id", "file_name", "file_url", "section", "page", "content", *META_FIELDS], top=1000
     )
     chunks = sorted(results, key=lambda r: int(r["id"].rsplit("-", 1)[1]))  # the id ends with the chunk's position
     return [
-        {"file_name": c["file_name"], "section": c.get("section") or "", "page": c.get("page"), "content": c["content"], "caption": "",
+        {"file_name": c["file_name"], "file_url": c.get("file_url") or "", "section": c.get("section") or "", "page": c.get("page"), "content": c["content"], "caption": "",
          **{name: c.get(name) for name in META_FIELDS}}
         for c in chunks
     ]
@@ -244,7 +245,7 @@ def hybrid_search(
         search_text=text,
         vector_queries=[VectorizedQuery(vector=vector, k_nearest_neighbors=k, fields="content_vector")],
         filter=section_filter,
-        select=["file_name", "section", "page", "content", *META_FIELDS],
+        select=["file_name", "file_url", "section", "page", "content", *META_FIELDS],
         scoring_profile=SCORING_PROFILE,
         scoring_parameters=[f"boostSections-{','.join(BOOSTED_SECTIONS)}"],
         top=k,
@@ -266,7 +267,7 @@ def hybrid_search(
     for result in results:
         captions = result.get("@search.captions") or []
         found.append({
-            "file_name": result["file_name"], "section": result.get("section") or "", "page": result.get("page"),
+            "file_name": result["file_name"], "file_url": result.get("file_url") or "", "section": result.get("section") or "", "page": result.get("page"),
             "content": result["content"], "caption": captions[0].text if captions and captions[0].text else "",
             **{name: result.get(name) for name in META_FIELDS},
         })

@@ -148,6 +148,9 @@ def _excerpts(sources: list[dict]) -> None:
         page = f" · p.{s['page']}" if s.get("page") else ""
         who = f" · {esc(s['candidate_name'])}" if s.get("candidate_name") else ""
         st.markdown(f"- **{esc(s['file_name'])}**{who} · {esc(s['section'])}{page}")
+    urls = {s["file_name"]: s["file_url"] for s in sources if s.get("file_url")}
+    for name, url in urls.items():  # the plain address stored with the chunks; it opens only through a signed link
+        st.caption(f"{esc(name)}: {code(url)}")
 
 
 def _settings(trace: dict) -> None:

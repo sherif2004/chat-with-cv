@@ -142,6 +142,14 @@ Every call that touches Azure takes the logged-in user's workspace as an argumen
 
 CVs uploaded before this change stay in the old shared container and index (the plain prefix names) and are not moved to any user. Re-upload them from a user account, then delete the old container and index in the Azure portal when you no longer need them.
 
+### Links to the original CVs
+
+Every chunk is stored with the plain Blob address of its CV (`file_url`) next to the file name. The containers are private, so that address does not open on its own. In the **Sources** list, each CV name is a link to a signed, read-only address that works for one hour and is made on demand for the logged-in user's own container (it needs a storage connection string that includes the account key). The address is never given to the model.
+
+CVs indexed before this feature have no address yet. Press **Update outdated CVs** to index them again.
+
+File names from uploads must be plain names: no `/` or `\`, no control characters, not `.` or `..`, at most 200 characters. Other files are shown as failed in the status panel.
+
 **Status:** login, sign-up and per-user data are done. Chat history in Postgres, NER extraction and the UI changes are the next steps (see `docs/superpowers/specs/2026-10-07-accounts-design.md`).
 
 ---
