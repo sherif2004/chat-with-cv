@@ -24,11 +24,12 @@ SUGGESTIONS = [
 SHOWN = 20  # messages drawn at first in a long chat, and added by each "Load earlier messages"
 
 
-def render(ws: Workspace, has_cvs: bool) -> None:
+def render(ws: Workspace, cvs: list[str], has_cvs: bool) -> None:
     question = st.chat_input("Ask about skills, experience, education...", disabled=not has_cvs)
     question = question or st.session_state.pop("suggested_question", None)
 
     _header(ws)
+    _scope(cvs)
     messages = st.session_state.messages
     if not messages and not question:
         _welcome(has_cvs)
@@ -39,6 +40,23 @@ def render(ws: Workspace, has_cvs: bool) -> None:
         _show(ws, messages[index], index)
     if question:
         _answer(ws, question)
+
+
+def _scope(cvs: list[str]) -> None:
+    """Which CVs the chat answers from. Nothing selected means all of them."""
+    if not cvs:
+        return
+    if "chat_scope" not in st.session_state:  # Streamlit forgets a widget's value while another view is shown: restore it
+        st.session_state.chat_scope = [name for name in st.session_state.get("scope_saved", []) if name in cvs]
+    st.session_state.chat_scope = [name for name in st.session_state.chat_scope if name in cvs]  # drop deleted CVs
+    chosen = st.session_state.chat_scope
+    label = "All CVs" if not chosen else (safe.esc(chosen[0]) if len(chosen) == 1 else f"{len(chosen)} CVs")
+    with st.popover(f"Chat with: {label}", icon=":material/filter_list:"):
+        st.multiselect(
+            "Chat with", cvs, key="chat_scope", placeholder="All CVs", label_visibility="collapsed",
+            help="Pick one or more CVs to answer only from them. Leave empty to search all CVs.",
+        )
+    st.session_state.scope_saved = list(st.session_state.chat_scope)
 
 
 def _load_earlier() -> None:
@@ -70,7 +88,8 @@ def _welcome(has_cvs: bool) -> None:
         "</div>"
     )
     if not has_cvs:
-        st.info(f"Process at least {config.MIN_CVS} CVs from the sidebar to start chatting.", icon=":material/info:")
+        st.info(f"Add at least {config.MIN_CVS} CVs in the Library to start chatting.", icon=":material/info:")
+        st.button("Open the Library", icon=":material/upload_file:", type="primary", on_click=_open_library)
         return
     columns = st.columns(2)
     for i, suggestion in enumerate(SUGGESTIONS):
@@ -81,6 +100,10 @@ def _welcome(has_cvs: bool) -> None:
             on_click=_suggest,
             args=(suggestion,),
         )
+
+
+def _open_library() -> None:
+    st.session_state.view = "Library"
 
 
 def _suggest(question: str) -> None:

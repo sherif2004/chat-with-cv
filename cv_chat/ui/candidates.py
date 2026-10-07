@@ -15,7 +15,7 @@ def _profiles(ws: Workspace, cvs: tuple[str, ...]) -> dict[str, dict]:
     return search_index.list_profiles(ws)
 
 
-def _candidates(ws: Workspace, cvs: list[str]) -> list[dict]:
+def candidate_list(ws: Workspace, cvs: list[str]) -> list[dict]:
     try:
         profiles = _profiles(ws, tuple(cvs))
     except Exception:  # the CVs are still listed, just without their details
@@ -32,9 +32,9 @@ def _candidates(ws: Workspace, cvs: list[str]) -> list[dict]:
 
 def render(ws: Workspace, cvs: list[str]) -> None:
     if not cvs:
-        st.info("No CVs yet. Upload and process some in the sidebar.", icon=":material/info:")
+        st.info("No CVs yet. Add some in the Library.", icon=":material/info:")
         return
-    candidates = _candidates(ws, cvs)
+    candidates = candidate_list(ws, cvs)
     search_column, years_column, sort_column = st.columns([3, 2, 2])
     text = search_column.text_input("Filter", placeholder="Name, title, location or file", label_visibility="collapsed").strip().lower()
     min_years = years_column.number_input("Minimum years", min_value=0, max_value=60, value=0, step=1, help="Minimum years")
@@ -87,4 +87,5 @@ def _link(ws: Workspace, file_name: str) -> str | None:
 def _chat_with(file_name: str) -> None:
     """Limit the chat to this CV and switch to it."""
     st.session_state.chat_scope = [file_name]
+    st.session_state.scope_saved = [file_name]
     st.session_state.view = "Chat"

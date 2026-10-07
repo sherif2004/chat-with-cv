@@ -36,7 +36,7 @@ Every answer comes from the uploaded CVs, is written in the language you asked i
 | Step | What you do | What the app does |
 |---|---|---|
 | 0. Account | Sign up or log in | Gives you your own CV storage, search index and saved chats |
-| 1. Upload | Drop PDF or DOCX CVs in the sidebar (at least 8 in total) | Reads and stores them |
+| 1. Upload | Drop PDF or DOCX CVs in the **Library** (at least 8 in total) | Reads and stores them |
 | 2. Process | Click **Process CVs** | Reads each CV's layout, splits it by section and makes it searchable, several CVs at the same time. CVs that are already indexed and unchanged are skipped |
 | 3. Ask | Type a question in the chat, in any language | Works out what kind of question it is, finds the relevant parts of the CVs (or plans several searches for a complex question) and streams an answer in your language, with `[file, p.N]` citations |
 | 4. Check | Open **Sources** or **Details** under an answer | Sources: which CVs, and which excerpts, the answer used. Details: how the question was routed, what was searched, and where the time went |
@@ -79,7 +79,7 @@ flowchart LR
 7. **Save to Azure AI Search.** The new chunks are uploaded first, then chunks the new version no longer has are deleted, so a CV is never missing from the index.
 8. **Save the original** to Azure Blob Storage, then clear the answer cache (see [Caching](#caching)).
 
-Several CVs are processed in parallel (4 at a time) by a background queue, and the sidebar shows each file's state live. Docling runs one conversion at a time (its models are not thread-safe), but other CVs can embed and upload while one is being read. One CV failing, for example a scanned PDF with no text, never stops the others.
+Several CVs are processed in parallel (4 at a time) by a background queue, and the Library shows each file's state live (the sidebar shows a progress bar on every page while it runs). Docling runs one conversion at a time (its models are not thread-safe), but other CVs can embed and upload while one is being read. One CV failing, for example a scanned PDF with no text, never stops the others.
 
 ### 2. Answering a question (every time you ask)
 
@@ -98,7 +98,7 @@ flowchart TD
 ```
 
 1. **Route and rewrite the question.** One quick model call decides whether the message needs a search at all (*chat*: greetings and thanks do not), needs one search (*simple*), or is *complex* (comparing, ranking, counting or listing across many CVs, or several questions in one). It also turns a follow-up like "what about his education?" into a standalone **English** search query using the recent chat (the CVs are English, so this works for a question asked in any language), and picks which CV sections hold the answer (for example `education`). If this step fails, the original question is searched as it is.
-2. **Query expansion (optional, sidebar toggle).** The question is also reworded two ways and each version is searched; the result lists are merged with reciprocal rank fusion, so a chunk found by several queries rises to the top.
+2. **Query expansion (optional, in the account menu under Chat settings).** The question is also reworded two ways and each version is searched; the result lists are merged with reciprocal rank fusion, so a chunk found by several queries rises to the top.
 3. **Embed the query** the same way as the chunks. Embeddings of repeated queries are cached in memory.
 4. **Hybrid search, filtered by section.** Azure AI Search runs two searches in one query and merges the rankings:
    - *keyword search* finds exact words, such as a skill, tool or name (English stemming: "built" also finds "building"),
@@ -119,8 +119,8 @@ Any text that comes from a CV is treated as data, not as instructions (see [Safe
 
 1. Show the login and sign-up screen until someone is logged in (a session cookie keeps you logged in).
 2. Load the settings and connect to Azure (a missing `.env` value shows a clear error), and make sure this user's container and index exist.
-3. Draw the sidebar: account menu, chats, upload box, **Process CVs** button and the list of CVs.
-4. Draw the main area: the **Chat** or **Candidates** view.
+3. Draw the sidebar: the account menu, **New chat**, chat search and the chat list. Nothing else, so it stays a simple place to move between chats.
+4. Draw the main area: a top bar with **Chat**, **Candidates** and **Library**, and the view you picked (only that one is drawn).
 
 ---
 
@@ -146,12 +146,13 @@ Two things to change before the app is reachable from anywhere but your own mach
 Your email at the top of the sidebar opens the account menu:
 
 - **Log out** ends this session.
+- **Chat settings** has **Query expansion** (also search two reworded versions of each question: finds more, answers start 1 to 2 seconds later), **Cache final answers** (reuse the answer to an identical question in an identical chat: off by default, because a cached answer can be out of date) and **Clear cache**.
 - **Change password** asks for the current password and logs you out on your other devices.
 - **Delete my account** (you type your email and enter your password to confirm) deletes your CVs, your search index, your saved chats and your account. Azure data is deleted first: if that fails, nothing else is removed and you can try again. It waits until CVs that are being processed have finished.
 
 ### Chats
 
-Every answer is saved, like in other chat apps. The sidebar has **New chat**, a **Search chats** box and the list of your chats grouped under **Today**, **Yesterday**, **Previous 7 days** and **Older**, newest first. The open chat is highlighted and its title is shown above the conversation, where you can rename it. Click a chat to reopen it with its sources and details. Each chat's ⋮ menu renames it, or deletes it after you tick a confirmation. Search looks in chat titles and in the text of every question and answer, and only ever in your own chats. The list shows 30 chats at first, with **Show more**. The model still only sees the last few messages of a chat.
+Every answer is saved, like in other chat apps. The sidebar holds only the chats: **New chat**, a **Search chats** box and the list of your chats grouped under **Today**, **Yesterday**, **Previous 7 days** and **Older**, newest first. The open chat is highlighted and its title is shown above the conversation, where you can rename it. Click a chat to reopen it with its sources and details. Each chat's ⋮ menu renames it, or deletes it after you tick a confirmation. Search looks in chat titles and in the text of every question and answer, and only ever in your own chats. The list shows 30 chats at first, with **Show more**. The model still only sees the last few messages of a chat.
 
 ### Look and speed
 
@@ -237,23 +238,21 @@ The browser opens automatically. Each user's search index and Blob container are
 
 ## Using the app
 
-1. **Upload.** In the sidebar, drop CVs (PDF or DOCX) into the upload box. **Process CVs** stays disabled until the knowledge base would hold at least 8 CVs (the ones already indexed plus the new files), and the chat stays disabled while there are fewer than 8.
-2. **Process.** Click **Process CVs**. The files are processed in the background, 4 at a time, and a live status list in the sidebar refreshes every 2 seconds. Each file shows *waiting*, then the stage it is in (*reading layout*, *reading name, title and experience*, *embedding*, *saving*), then a green check with its chunk count, a grey check if it was already indexed and unchanged, or a red mark and the reason if it failed. A progress bar and a line such as "4 running in parallel · 3 waiting" show the whole batch. You can keep using the app while it runs; when the last file finishes the CV list updates by itself. **Clear status** removes the finished entries.
+1. **Upload.** Open the **Library** (top bar) and drop CVs (PDF or DOCX) into the upload box. **Process CVs** stays disabled until the knowledge base would hold at least 8 CVs (the ones already indexed plus the new files), and the chat stays disabled while there are fewer than 8.
+2. **Process.** Click **Process CVs**. The files are processed in the background, 4 at a time, and a live status list in the Library refreshes every 2 seconds. Each file shows *waiting*, then the stage it is in (*reading layout*, *reading name, title and experience*, *embedding*, *saving*), then a green check with its chunk count, a grey check if it was already indexed and unchanged, or a red mark and the reason if it failed. A progress bar and a line such as "4 running in parallel · 3 waiting" show the whole batch. You can switch to the chat or the Candidates view meanwhile: the sidebar keeps a small progress bar, and when the last file finishes the CV list updates by itself and a message tells you. **Clear status** removes the finished entries.
 3. **Ask.** Type a question in any language, or click one of the suggested questions on the welcome screen. The answer streams in as it is written, in the language you asked in. While it works, a status box shows what is happening (the router's decision, each search, each agent step).
 4. **Check the sources.** Open **Sources** under an answer to see which CVs it used and the most relevant passage of each.
 5. **Check the details.** Switch on **Details** (its label shows the route and the total time) for tabs with: a *Timeline* of every step with its time and share of the total (router, query expansion, each search, agent rounds and tools, the model's wait for its first word, writing the answer); the *Router* result (class, standalone question, sections searched); every *Search* (query, chunks found, filters, cached or not); the *Agent* rounds and tool calls; the exact *Excerpts used*; and the *Settings* (model deployments, query expansion, answer cache). Details are kept with each message for the whole chat.
-6. **Manage a CV.** Open **Manage a CV** in the sidebar, pick a CV, then:
+6. **Manage a CV.** The Library lists every CV in a table (file, candidate, job title, years). Select a row, then:
+   - **Open CV** opens the original file through a one-hour signed link,
    - **Re-index** queues the stored file for processing again (for example after the pipeline changed) and shows it in the same status list,
-   - **Delete** removes it from Blob Storage and from search, after a confirmation. If this leaves fewer than 8 CVs, the chat is disabled until you add more,
-   - **Update outdated CVs** checks every stored CV against the current pipeline and re-indexes only those processed by an older version (the others show as skipped).
-7. **Sidebar switches.**
-   - **Query expansion** searches reworded versions of each question as well (finds more, answers start 1 to 2 seconds later, three searches per question),
-   - **Cache final answers** reuses the answer to an identical question in an identical chat (off by default, because a cached answer can be out of date),
-   - **Clear cache** forgets everything cached by hand.
+   - **Delete** removes it from Blob Storage and from search, after a confirmation. If this leaves fewer than 8 CVs, the chat is disabled until you add more.
+   **Update outdated CVs** (above the table) checks every stored CV against the current pipeline and re-indexes only those processed by an older version (the others show as skipped).
+7. **Choose what to chat with.** The **Chat with** button above the conversation picks one or more CVs to answer from. Leave it on "All CVs" to search everything. **Chat with this CV** on a Candidates card sets it for you.
 8. **Start over.** **New chat** starts a new conversation and keeps the old one in your chat list. It does not delete any CVs.
 9. **Browse candidates.** Switch to **Candidates** above the chat to see every CV as a card (see [Candidates view](#candidates-view)).
 
-Your CVs stay in Azure, so they are still there after you close the app. The sidebar lists them again the next time you open it.
+Your CVs stay in Azure, so they are still there after you close the app. The Library lists them again the next time you open it.
 
 ---
 
@@ -295,7 +294,8 @@ chat-with-cv/
         ├── accounts.py           # login and sign-up screen, session cookie, account menu
         ├── candidates.py         # the Candidates view
         ├── chats.py              # the chat list: search, grouping by age, open, rename, delete
-        ├── sidebar.py            # account menu, upload, process, list of CVs
+        ├── sidebar.py            # the sidebar: chat list and a progress bar while CVs are processed
+        ├── library.py            # the Library: upload, progress, the table of CVs, open / re-index / delete
         ├── style.py              # adds the stylesheet to every page
         ├── chat.py               # conversation and sources
         ├── details.py            # the Details panel: route, timeline, searches, agent, excerpts
@@ -361,7 +361,7 @@ The search index settings (text analyzer `en.microsoft`, field weights, boosted 
 
 - **Uploading the same file again is cheap.** If the content has not changed it is skipped. If it has, its chunks are replaced and any leftover chunks from the old version are deleted.
 - **Same CV under a different file name counts as a different CV.** `cv.pdf` and `cv (1).pdf` are stored separately.
-- **After changing extraction or chunking code or settings**, click **Update outdated CVs** (under **Manage a CV**), or **Process CVs** with the files again. The change is detected automatically and the CVs are re-indexed, even though the files are unchanged; CVs already up to date are skipped. (Any edit to `extract.py`, `chunking.py`, `sections.py` or `entities.py`, even a comment, counts as a change.)
+- **After changing extraction or chunking code or settings**, click **Update outdated CVs** (in the Library), or **Process CVs** with the files again. The change is detected automatically and the CVs are re-indexed, even though the files are unchanged; CVs already up to date are skipped. (Any edit to `extract.py`, `chunking.py`, `sections.py` or `entities.py`, even a comment, counts as a change.)
 - **Using an index from an older version of the app:** delete it in the Azure portal (each user's index is named `<AZURE_SEARCH_INDEX>-<user id>`) and process the CVs again. Azure cannot change an analyzer, a field's filterable flag or the vector metric on an existing index, so the app stops at start-up with a message that names what is outdated. After recreating it, click **Update outdated CVs** to index the stored CVs again.
 - **The first CV is slow.** Docling loads its layout models on first use. After that, extraction takes a few seconds per CV on CPU. A GPU (`DOCLING_DEVICE = "cuda"`) is much faster.
 - **Delete is permanent.** It removes the original file from Blob Storage and the CV from the index.
@@ -391,7 +391,7 @@ The reasoning, limits and costs behind each part of the chat side.
 
 ### Query expansion
 
-- The question is expanded into two alternative search queries (one keyword-style, one worded the way a CV would say it). Each runs the usual hybrid search with semantic re-ranking, and the lists are merged with reciprocal rank fusion. A sidebar toggle turns it on and off.
+- The question is expanded into two alternative search queries (one keyword-style, one worded the way a CV would say it). Each runs the usual hybrid search with semantic re-ranking, and the lists are merged with reciprocal rank fusion. A switch in the account menu (Chat settings) turns it on and off.
 - *Why:* CVs word the same thing differently ("built APIs" versus "REST services"), so one query can miss relevant chunks.
 - *Cost:* one more model call and three searches per question, so answers start about 1 to 2 seconds later. Each search uses the semantic ranker, which has a monthly query quota on lower tiers.
 
@@ -412,8 +412,8 @@ The reasoning, limits and costs behind each part of the chat side.
 - **Router results** are cached per question and recent chat, so asking again skips that model call. A message that opens a chat and that the router classifies as *chat* ("hi", "thanks") is also cached by its text alone, so it is recognised again later in any chat. Decisions made with a chat history are never shared this way.
 - **Chat replies** to such messages are cached by their text alone (always on), so saying "hi" again makes no model call at all. These replies are written without the chat history, so nothing from one conversation can reach another.
 - **Search results** are cached per query, section filter and CV filter, so repeats skip the searches and do not use the semantic ranker quota again.
-- **Final answers** can optionally be cached too, only for an identical question with identical chat history (sidebar switch, off by default).
-- **Invalidation.** The whole cache is cleared whenever a CV is processed, re-indexed or deleted, so answers never cite a CV that was removed or changed. A result computed while a CV was changing is not stored. **Clear cache** in the sidebar clears your own cache by hand.
+- **Final answers** can optionally be cached too, only for an identical question with identical chat history (a setting in the account menu, off by default).
+- **Invalidation.** The whole cache is cleared whenever a CV is processed, re-indexed or deleted, so answers never cite a CV that was removed or changed. A result computed while a CV was changing is not stored. **Clear cache** (account menu, Chat settings) clears your own cache by hand.
 - The cache is in memory, per app process. The in-memory cache of query embeddings (`EMBED_CACHE_SIZE`) is separate.
 
 ### Search boosts and CV metadata
@@ -452,7 +452,7 @@ Most problems now show a message that says what to check. These are the ones you
 | `Your session has ended. Log in again.` | Your session was ended elsewhere (you logged out, changed your password or deleted the account on another device) or it expired after 14 days. Log in again |
 | Log line `spaCy model ... is not available` | The spaCy package or its English model is not installed, so names are read by a plain rule and locations stay empty. Run `pip install -r requirements.txt` again (the model comes from a GitHub release URL, so it needs internet access), then restart the app |
 | `Missing 'AZURE_...' in .env` | Lists every empty or missing value at once. Copy `.env.example` to `.env`, fill them in and restart the app |
-| `The index '...' was made by an older version` | The index settings changed (English text analyzer, filterable file names, explicit cosine metric, CV metadata fields, a scoring profile, searchable section headings) and Azure cannot change these in place. Delete the user's index in the Azure portal, restart the app, then open **Manage a CV** and click **Update outdated CVs** to index the stored CVs again |
+| `The index '...' was made by an older version` | The index settings changed (English text analyzer, filterable file names, explicit cosine metric, CV metadata fields, a scoring profile, searchable section headings) and Azure cannot change these in place. Delete the user's index in the Azure portal, restart the app, then open the Library and click **Update outdated CVs** to index the stored CVs again |
 | `Could not connect to Azure` at start-up | A value in `.env` is malformed, most often the storage connection string. Copy it again from the portal |
 | `Azure OpenAI has no deployment named '...'` | Use the **deployment name** (not the model name) exactly as in the portal. The endpoint is cleaned up for you (a trailing `/openai/v1` is removed), but the API version must look like `2024-10-21` |
 | `The index '...' stores vectors of length N` | The index was created with another embedding model. Delete the index in the Azure portal, then process the CVs again |
@@ -460,8 +460,8 @@ Most problems now show a message that says what to check. These are the ones you
 | A note says excerpts from a CV *were left out because Azure's content safety filter flagged them* | Azure's jailbreak detection saw something that looks like an instruction in that CV's text. The answer used the other excerpts. Check the CV; the app keeps working |
 | `Could not answer: ...` under a question | The model call failed (a wrong deployment name, a rate limit, a network error). The message says why. Try again, or lower `MAX_WORKERS` if it happens during an upload |
 | `No text found (scanned PDF?)` | OCR ran and still found nothing: the file is blank or the image is unreadable. Try a clearer copy |
-| `Could not list the CVs` in the sidebar | The storage connection string or container name is wrong, or the storage account is not reachable |
-| **Process CVs** is greyed out | By design: no files are selected, or the indexed plus new CVs are still fewer than 8. The sidebar says how many more are needed |
+| `Could not list the CVs` in the Library | The storage connection string or container name is wrong, or the storage account is not reachable |
+| **Process CVs** is greyed out | By design: no files are selected, or the indexed plus new CVs are still fewer than 8. The Library says how many more are needed |
 | The chat input is disabled | By design: fewer than 8 CVs are in Azure |
 
 If the search service has no semantic ranker (Free tier, or it is switched off), the app does not fail: it logs a warning and answers with plain hybrid search. Answers are less precisely ranked and Sources show the start of each chunk instead of the best passage.

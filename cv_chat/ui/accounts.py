@@ -104,6 +104,21 @@ def account_menu(user: auth.User) -> None:
             auth.log_out(st.session_state.get("token"))
             _end_session("You are logged out. Reload the page to log in again.")
         st.divider()
+        st.markdown("**Chat settings**")
+        st.toggle(
+            "Query expansion", key="expand_queries",
+            help="Also search two reworded versions of each question and merge the results. "
+            "Finds more, but answers start 1 to 2 seconds later and each question uses three semantic searches.",
+        )
+        st.toggle(
+            "Cache final answers", key="cache_answers",
+            help="Reuse the answer to an identical question in an identical chat. Off by default: a cached answer can be out of date.",
+        )
+        st.button(
+            "Clear cache", icon=":material/mop:", width="stretch", on_click=_clear_cache, args=(user,),
+            help="Forget cached router results, searches and answers. This also happens whenever a CV is processed or deleted.",
+        )
+        st.divider()
         st.markdown("**Change password**")
         with st.form("change_password", clear_on_submit=True):
             current = st.text_input("Current password", type="password")
@@ -125,6 +140,14 @@ def account_menu(user: auth.User) -> None:
                 _delete_account(user)
             else:
                 st.error("Wrong password.")
+
+
+def _clear_cache(user: auth.User) -> None:
+    from cv_chat.rag.cache import cache_for  # imported here: the account menu must work even when the Azure settings are wrong
+    from cv_chat.workspace import Workspace
+
+    cache_for(Workspace(user.id)).clear()
+    st.toast("Cache cleared", icon=":material/task_alt:")
 
 
 def _delete_account(user: auth.User) -> None:

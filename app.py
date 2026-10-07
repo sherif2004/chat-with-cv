@@ -13,7 +13,7 @@ try:
     from cv_chat import config
     from cv_chat.workspace import Workspace
     from cv_chat.rag import ingest
-    from cv_chat.ui import candidates, chat, sidebar
+    from cv_chat.ui import candidates, chat, library, sidebar
 except KeyError as missing:  # config.py raises KeyError for a value missing from .env
     st.error(f"Missing {missing} in .env. Copy .env.example to .env and fill in your Azure values.", icon=":material/error:")
     st.stop()
@@ -36,10 +36,13 @@ except Exception as error:  # for example an index built for a different embeddi
     st.stop()
 
 st.session_state.setdefault("messages", [])
-cvs = sidebar.render(ws)
-view = st.segmented_control("View", ["Chat", "Candidates"], key="view", default="Chat", label_visibility="collapsed")
-if view == "Candidates":
+sidebar.render(ws)
+cvs = library.cv_names(ws)
+view = st.segmented_control("View", ["Chat", "Candidates", "Library"], key="view", default="Chat", label_visibility="collapsed")
+if view == "Candidates":  # only the chosen view is drawn, so the other pages cost nothing
     candidates.render(ws, cvs)
-else:  # only the chosen view is drawn, so the Candidates page costs nothing while you chat
+elif view == "Library":
+    library.render(ws, cvs)
+else:
     style.inject(reading_column=True)
-    chat.render(ws, has_cvs=len(cvs) >= config.MIN_CVS)
+    chat.render(ws, cvs, has_cvs=len(cvs) >= config.MIN_CVS)
