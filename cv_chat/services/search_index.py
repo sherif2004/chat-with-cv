@@ -178,6 +178,16 @@ def metadata_filter(min_years: float | None = None, max_years: float | None = No
     return " and ".join(parts) or None
 
 
+def list_chunks() -> list[tuple[str, str]]:
+    """(chunk id, file name) for every chunk in the index."""
+    return [(result["id"], result["file_name"]) for result in _search_client.search("*", select=["id", "file_name"])]
+
+
+def delete_chunks(ids: list[str]) -> None:
+    if ids:
+        _search_client.delete_documents([{"id": chunk_id} for chunk_id in ids])
+
+
 def get_cv_chunks(file_id: str) -> list[dict]:
     """Every chunk of one CV in reading order."""
     results = _search_client.search(

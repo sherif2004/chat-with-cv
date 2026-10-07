@@ -40,6 +40,8 @@ class IngestQueue:
         """files: (file name, bytes). bytes=None means use the stored original (re-index). May raise if Azure setup fails."""
         blob_storage.ensure_container()
         ingest.prepare()
+        if not self.active():  # a file in progress is in the index before it reaches Blob Storage, so never sweep while one runs
+            ingest.remove_deleted_cvs()
         with self._lock:
             self._jobs = {name: job for name, job in self._jobs.items() if job.state not in FINISHED}
         for name, data in files:
