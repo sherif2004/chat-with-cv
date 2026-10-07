@@ -3,17 +3,18 @@ import streamlit as st
 
 from cv_chat import config
 from cv_chat.rag import ingest, jobs
-from cv_chat.rag.cache import cache
+from cv_chat.rag.cache import cache_for
 from cv_chat.ui.safe import esc
+from cv_chat.workspace import Workspace
 
 
-def render() -> list[str]:
+def render(ws: Workspace) -> list[str]:
     """Draw the sidebar and return the names of the indexed CVs."""
     if notice := st.session_state.pop("notice", None):  # result of a Manage action, which ran before this rerun
         st.toast(esc(notice[0]), icon=notice[1])
     with st.sidebar:
         st.markdown("### :material/folder_open: Knowledge base")
-        cvs = _list_cvs()
+        cvs = _list_cvs(ws)
         st.caption(f"Upload at least {config.MIN_CVS} CVs")
         files = st.file_uploader(
             "CV files", type=["pdf", "docx"], accept_multiple_files=True, label_visibility="collapsed"
@@ -24,12 +25,12 @@ def render() -> list[str]:
         if files and not enough:
             st.warning(f"{total} of {config.MIN_CVS} CVs. Add {config.MIN_CVS - total} more to continue.", icon=":material/info:")
         if st.button("Process CVs", icon=":material/bolt:", type="primary", disabled=not files or not enough, width="stretch"):
-            _start([(f.name, f.getvalue()) for f in files])
-        _status_panel()
+            _start(ws, [(f.name, f.getvalue()) for f in files])
+        _status_panel(ws)
 
         _show(cvs)
         if cvs:
-            _manage(cvs)
+            _manage(ws, cvs)
 
         if cvs:
             _scope(cvs)
@@ -44,7 +45,7 @@ def render() -> list[str]:
             help="Reuse the answer to an identical question in an identical chat. Off by default: a cached answer can be out of date.",
         )
         st.button(
-            "Clear cache", icon=":material/mop:", width="stretch", on_click=_clear_cache,
+            "Clear cache", icon=":material/mop:", width="stretch", on_click=_clear_cache, args=(ws,),
             help="Forget cached router results, searches and answers. This also happens whenever a CV is processed or deleted.",
         )
         if st.button("New chat", icon=":material/add_comment:", width="stretch"):
@@ -52,23 +53,24 @@ def render() -> list[str]:
     return cvs
 
 
-def _clear_cache() -> None:
-    cache.clear()
+def _clear_cache(ws: Workspace) -> None:
+    cache_for(ws).clear()
     st.session_state.notice = ("Cache cleared", ":material/task_alt:")
 
 
-def _start(files: list[tuple[str, bytes]]) -> None:
+def _start(ws: Workspace, files: list[tuple[str, bytes]]) -> None:
     """Queue the files. They are processed in the background, several at a time, and show up in the status panel."""
     try:
-        jobs.queue.submit(files)
+        jobs.queue_for(ws).submit(files)
     except Exception as error:  # setup failed before any file ran (for example a wrong key)
         st.error(str(error).splitlines()[0], icon=":material/error:")
 
 
 @st.fragment(run_every=2)
-def _status_panel() -> None:
+def _status_panel(ws: Workspace) -> None:
     """Live state of every file, refreshed every 2 seconds. When the last file finishes, the whole app reruns once."""
-    snapshot = jobs.queue.snapshot()
+    queue = jobs.queue_for(ws)
+    snapshot = queue.snapshot()
     if snapshot:
         finished = [job for job in snapshot if job.state in jobs.FINISHED]
         running = sum(job.state == "processing" for job in snapshot)
@@ -80,9 +82,9 @@ def _status_panel() -> None:
             for job in snapshot:
                 _show_job(job)
         if len(finished) == len(snapshot):
-            st.button("Clear status", icon=":material/close:", on_click=jobs.queue.clear_finished, width="stretch")
+            st.button("Clear status", icon=":material/close:", on_click=queue.clear_finished, width="stretch")
 
-    active = jobs.queue.active()
+    active = queue.active()
     if st.session_state.get("ingest_was_active") and not active:
         failed = sum(job.state == "failed" for job in snapshot)
         st.session_state.notice = (
@@ -109,13 +111,13 @@ def _show_job(job: jobs.Job) -> None:
         st.caption(esc((job.error.splitlines() or ["Failed"])[0][:200]))
 
 
-def _list_cvs(show_error: bool = True) -> list[str]:
+def _list_cvs(ws: Workspace, show_error: bool = True) -> list[str]:
     try:
-        return ingest.list_cvs()
+        return ingest.list_cvs(ws)
     except Exception as error:
         if show_error:
             st.error(
-                f"Could not list the CVs: {str(error).splitlines()[0]}. Check AZURE_STORAGE_CONNECTION_STRING and AZURE_STORAGE_CONTAINER in .env.",
+                f"Could not list the CVs: {str(error).splitlines()[0]}. Check AZURE_STORAGE_CONNECTION_STRING in .env.",
                 icon=":material/error:",
             )
         return []
@@ -138,45 +140,45 @@ def _scope(cvs: list[str]) -> None:
     )
 
 
-def _manage(cvs: list[str]) -> None:
+def _manage(ws: Workspace, cvs: list[str]) -> None:
     """Re-index or delete one CV. The buttons act in callbacks, so the list above is drawn after the change."""
     with st.expander("Manage a CV", icon=":material/tune:"):
         target = st.selectbox("CV", cvs, label_visibility="collapsed")
         reindex_column, delete_column = st.columns(2)
         reindex_column.button(
-            "Re-index", icon=":material/refresh:", width="stretch", on_click=_reindex, args=(target,),
+            "Re-index", icon=":material/refresh:", width="stretch", on_click=_reindex, args=(ws, target),
             help="Process the stored file again, for example after the pipeline changed",
         )
         with delete_column.popover("Delete", icon=":material/delete:", width="stretch"):
             st.write(f"Delete **{esc(target)}** from storage and from search?")
-            st.button("Yes, delete", type="primary", icon=":material/delete:", on_click=_delete, args=(target,))
+            st.button("Yes, delete", type="primary", icon=":material/delete:", on_click=_delete, args=(ws, target))
         st.button(
-            "Update outdated CVs", icon=":material/published_with_changes:", width="stretch", on_click=_update_all, args=(cvs,),
+            "Update outdated CVs", icon=":material/published_with_changes:", width="stretch", on_click=_update_all, args=(ws, cvs),
             help="Check every CV against the current pipeline and re-index only those processed by an older version. "
             "The status panel shows the unchanged ones as skipped.",
         )
 
 
-def _update_all(names: list[str]) -> None:
+def _update_all(ws: Workspace, names: list[str]) -> None:
     """Queue every stored CV without forcing: those the current pipeline already indexed are skipped, the rest are re-indexed."""
     try:
-        jobs.queue.submit([(name, None) for name in names], force=False)
+        jobs.queue_for(ws).submit([(name, None) for name in names], force=False)
     except Exception as error:
         st.session_state.notice = (f"Could not update the CVs: {str(error).splitlines()[0][:150]}", ":material/error:")
 
 
-def _reindex(name: str) -> None:
+def _reindex(ws: Workspace, name: str) -> None:
     """Queue the stored original for processing again; the status panel shows its progress."""
     try:
-        jobs.queue.submit([(name, None)], force=True)
+        jobs.queue_for(ws).submit([(name, None)], force=True)
     except Exception as error:
         st.session_state.notice = (f"Could not re-index {name}: {str(error).splitlines()[0][:150]}", ":material/error:")
 
 
-def _delete(name: str) -> None:
+def _delete(ws: Workspace, name: str) -> None:
     try:
-        ingest.delete_cv(name)
-        jobs.queue.forget(name)
+        ingest.delete_cv(ws, name)
+        jobs.queue_for(ws).forget(name)
         st.session_state.notice = (f"Deleted {name}", ":material/task_alt:")
     except Exception as error:
         st.session_state.notice = (f"Could not delete {name}: {str(error).splitlines()[0][:150]}", ":material/error:")

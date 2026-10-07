@@ -18,6 +18,22 @@ def _prepare_database() -> None:
     db.init_schema()
 
 
+def _provision(user: auth.User) -> None:
+    """Create the new user's Azure container and search index. Anything half-made is removed if this fails."""
+    from cv_chat.rag import ingest  # imported here: the login screen must work even when the Azure settings are wrong
+    from cv_chat.workspace import Workspace
+
+    ws = Workspace(user.id)
+    try:
+        ingest.prepare(ws)
+    except Exception:
+        try:
+            ingest.destroy(ws)
+        except Exception:  # the original error is the one worth showing
+            pass
+        raise
+
+
 def _write_cookie(value: str, max_age: int) -> None:
     script = f"window.parent.document.cookie = {json.dumps(f'{COOKIE}={value}; path=/; max-age={max_age}; SameSite=Lax')};"
     components.html(f"<script>{script}</script>", height=0)
@@ -64,7 +80,7 @@ def _login_screen() -> str | None:
         password = st.text_input(f"Password (at least {auth.MIN_PASSWORD} characters)", type="password", key="signup_password")
         if st.form_submit_button("Create account", type="primary"):
             try:
-                auth.sign_up(email, password)
+                auth.sign_up(email, password, on_created=_provision)
                 return auth.log_in(email, password)
             except auth.AuthError as error:
                 st.error(str(error))

@@ -7,9 +7,10 @@ from functools import lru_cache
 
 from cv_chat import config
 from cv_chat.rag import metadata
-from cv_chat.rag.cache import SEARCH, cache
+from cv_chat.rag.cache import SEARCH, cache_for
 from cv_chat.rag.trace import Trace
 from cv_chat.services import openai_service, search_index
+from cv_chat.workspace import Workspace
 
 
 @lru_cache(maxsize=config.EMBED_CACHE_SIZE)
@@ -19,7 +20,7 @@ def embed_question(question: str) -> tuple[float, ...]:
 
 
 def search(
-    query: str, sections: list[str], file_ids: list[str] | None = None, where: str | None = None, trace: Trace | None = None
+    ws: Workspace, query: str, sections: list[str], file_ids: list[str] | None = None, where: str | None = None, trace: Trace | None = None
 ) -> list[dict]:
     """One hybrid search with semantic re-ranking, limited to the sections when there are enough hits. Cached."""
     start = time.perf_counter()
@@ -30,6 +31,7 @@ def search(
             trace.add("search", query, (time.perf_counter() - start) * 1000, results=len(results), **info)
         return results
 
+    cache = cache_for(ws)
     key = (query, tuple(sections), tuple(file_ids or ()), where)
     if (cached := cache.get(SEARCH, key)) is not None:
         info["cached"] = True
@@ -38,10 +40,10 @@ def search(
     embed_start = time.perf_counter()
     vector = list(embed_question(query))
     info["embed_ms"] = round((time.perf_counter() - embed_start) * 1000, 1)
-    results = search_index.hybrid_search(query, vector, config.RETRIEVE_K, sections, file_ids, where)
+    results = search_index.hybrid_search(ws, query, vector, config.RETRIEVE_K, sections, file_ids, where)
     if sections and len(results) < config.MIN_FILTERED_RESULTS:  # the CVs may use unusual headings: search everything
         info["fallback"] = True
-        results = search_index.hybrid_search(query, vector, config.RETRIEVE_K, file_ids=file_ids, where=where)
+        results = search_index.hybrid_search(ws, query, vector, config.RETRIEVE_K, file_ids=file_ids, where=where)
     cache.put(SEARCH, key, results, token)
     return record(results)
 
@@ -60,14 +62,14 @@ def fuse(result_lists: list[list[dict]]) -> list[dict]:
 
 
 def retrieve(
-    queries: list[str], sections: list[str], trace: Trace | None = None, file_ids: list[str] | None = None
+    ws: Workspace, queries: list[str], sections: list[str], trace: Trace | None = None, file_ids: list[str] | None = None
 ) -> list[dict]:
     """Search every query (the first is the main one), merge the lists and keep the best chunks. file_ids limits it to those CVs."""
     if len(queries) == 1:
-        results = search(queries[0], sections, file_ids, trace=trace)
+        results = search(ws, queries[0], sections, file_ids, trace=trace)
     else:
         with ThreadPoolExecutor(max_workers=len(queries)) as pool:
-            results = fuse(list(pool.map(lambda query: search(query, sections, file_ids, trace=trace), queries)))
+            results = fuse(list(pool.map(lambda query: search(ws, query, sections, file_ids, trace=trace), queries)))
     return spread_over_cvs(results)
 
 

@@ -134,7 +134,15 @@ Passwords are stored as argon2 hashes. A login is a random token in a browser co
 
 To run the tests: `uv run pytest`. They use a separate `cvchat_test` database that they create themselves.
 
-**Status:** login and sign-up are done. Per-user containers and indexes, chat history, NER extraction and the UI changes are the next steps (see `docs/superpowers/specs/2026-10-07-accounts-design.md`). Until per-user containers land, all users still share one set of CVs.
+### Each user has their own data
+
+Signing up creates the user's own Blob container (`<AZURE_STORAGE_CONTAINER>-<user id>`) and their own Azure AI Search index (`<AZURE_SEARCH_INDEX>-<user id>`). If either cannot be created, the account is not created either. The two `.env` values are therefore **prefixes** now.
+
+Every call that touches Azure takes the logged-in user's workspace as an argument, and the workspace is built only from that user's id, so a user's code cannot reach another user's CVs. The answer cache and the ingest queue are per user as well. Because each user needs a search index and Azure AI Search allows only a limited number per service (15 on the Basic tier), sign-ups are capped at 15.
+
+CVs uploaded before this change stay in the old shared container and index (the plain prefix names) and are not moved to any user. Re-upload them from a user account, then delete the old container and index in the Azure portal when you no longer need them.
+
+**Status:** login, sign-up and per-user data are done. Chat history in Postgres, NER extraction and the UI changes are the next steps (see `docs/superpowers/specs/2026-10-07-accounts-design.md`).
 
 ---
 

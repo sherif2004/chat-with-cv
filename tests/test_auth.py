@@ -70,3 +70,27 @@ def test_user_cap(monkeypatch):
     auth.sign_up("b@b.co", "correct horse")
     with pytest.raises(auth.AuthError, match="closed"):
         auth.sign_up("c@b.co", "correct horse")
+
+
+def test_failed_setup_removes_the_new_account():
+    def broken(user):
+        raise RuntimeError("Azure said no")
+
+    with pytest.raises(auth.AuthError, match="account was not created"):
+        auth.sign_up("a@b.co", "correct horse", on_created=broken)
+    with db.pool().connection() as conn:
+        assert conn.execute("SELECT count(*) FROM users").fetchone()[0] == 0
+    auth.sign_up("a@b.co", "correct horse")  # the email and the user slot are free again
+
+
+def test_setup_runs_with_the_new_user():
+    seen = []
+    user = auth.sign_up("a@b.co", "correct horse", on_created=seen.append)
+    assert seen == [user]
+
+
+def test_delete_user_removes_sessions():
+    user = auth.sign_up("a@b.co", "correct horse")
+    token = auth.log_in("a@b.co", "correct horse")
+    auth.delete_user(user.id)
+    assert auth.user_for_token(token) is None

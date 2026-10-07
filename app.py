@@ -10,6 +10,7 @@ accounts.logout_button()
 
 try:
     from cv_chat import config
+    from cv_chat.workspace import Workspace
     from cv_chat.rag import ingest
     from cv_chat.ui import chat, sidebar
 except KeyError as missing:  # config.py raises KeyError for a value missing from .env
@@ -21,17 +22,18 @@ except Exception as error:  # for example a malformed storage connection string
 
 
 
-@st.cache_resource(show_spinner="Checking the search index...")
-def _prepare_index() -> None:
-    ingest.prepare()  # an index made by an older version gets the new fields before the first question
+@st.cache_resource(show_spinner="Checking your storage and search index...")
+def _prepare_workspace(ws: Workspace) -> None:
+    ingest.prepare(ws)  # creates this user's container and index; an index made by an older version gets the new fields
 
 
+ws = Workspace(user.id)  # built only from the logged-in user's id, so every call below reaches only their own data
 try:
-    _prepare_index()
+    _prepare_workspace(ws)
 except Exception as error:  # for example an index built for a different embedding model
     st.error(f"Could not prepare the search index: {error}", icon=":material/error:")
     st.stop()
 
 st.session_state.setdefault("messages", [])
-cvs = sidebar.render()
-chat.render(has_cvs=len(cvs) >= config.MIN_CVS)
+cvs = sidebar.render(ws)
+chat.render(ws, has_cvs=len(cvs) >= config.MIN_CVS)

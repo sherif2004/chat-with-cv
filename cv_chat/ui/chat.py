@@ -6,6 +6,7 @@ import streamlit as st
 from cv_chat import config
 from cv_chat.rag import qa
 from cv_chat.ui import details, safe
+from cv_chat.workspace import Workspace
 
 ROUTE_NOTES = {
     "chat": "Answered without searching the CVs",
@@ -21,7 +22,7 @@ SUGGESTIONS = [
 ]
 
 
-def render(has_cvs: bool) -> None:
+def render(ws: Workspace, has_cvs: bool) -> None:
     st.html(Path(__file__).with_name("styles.css"))
     question = st.chat_input("Ask about skills, experience, education...", disabled=not has_cvs)
     question = question or st.session_state.pop("suggested_question", None)
@@ -31,7 +32,7 @@ def render(has_cvs: bool) -> None:
     for message in st.session_state.messages:
         _show(message)
     if question:
-        _answer(question)
+        _answer(ws, question)
 
 
 def _welcome(has_cvs: bool) -> None:
@@ -71,14 +72,14 @@ def _show(message: dict) -> None:
         _sources(message.get("sources", []))
 
 
-def _answer(question: str) -> None:
+def _answer(ws: Workspace, question: str) -> None:
     history = list(st.session_state.messages)
     _show({"role": "user", "content": question})
     with st.chat_message("assistant", avatar=AVATARS["assistant"]):
         try:
             with st.status("Reading your question...", expanded=True) as status:
                 stream, sources, route, trace = qa.ask(
-                    question, history, expand=st.session_state.get("expand_queries", False),
+                    ws, question, history, expand=st.session_state.get("expand_queries", False),
                     cache_answers=st.session_state.get("cache_answers", False), on_step=lambda step: st.write(safe.esc(step)),
                     scope=st.session_state.get("chat_scope", []),
                 )

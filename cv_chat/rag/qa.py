@@ -9,9 +9,10 @@ from typing import NamedTuple
 from cv_chat import config
 from cv_chat.processing.sections import SECTION_TYPES
 from cv_chat.rag import agent, ingest, retrieval
-from cv_chat.rag.cache import ANSWER, CHAT, ROUTE, cache
+from cv_chat.rag.cache import ANSWER, CHAT, ROUTE, Cache, cache_for
 from cv_chat.rag.trace import Trace
 from cv_chat.services import openai_service
+from cv_chat.workspace import Workspace
 
 log = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ class Route:
     sections: list[str]
 
 
-def _route(question: str, history: list[dict], trace: Trace | None = None) -> Route:
+def _route(cache: Cache, question: str, history: list[dict], trace: Trace | None = None) -> Route:
     """Classify the message and make it stand alone in one model call. Falls back to a plain search of the raw question."""
     recent = _recent(history)
     key = (question, tuple((m["role"], m["content"]) for m in recent))
@@ -179,7 +180,7 @@ def _guarded(sources: list[dict], messages_for: Callable[[list[dict]], list[dict
         yield from stream
 
 
-def _remember_chat(stream: Iterator[str], question: str, token: int) -> Iterator[str]:
+def _remember_chat(cache: Cache, stream: Iterator[str], question: str, token: int) -> Iterator[str]:
     """Pass a chat reply through and store it by the message text once it has been written completely."""
     pieces = []
     for piece in stream:
@@ -188,7 +189,7 @@ def _remember_chat(stream: Iterator[str], question: str, token: int) -> Iterator
     cache.put(CHAT, question, "".join(pieces), token)
 
 
-def _remember(stream: Iterator[str], sources: list[dict], route: str, key: tuple, token: int) -> Iterator[str]:
+def _remember(cache: Cache, stream: Iterator[str], sources: list[dict], route: str, key: tuple, token: int) -> Iterator[str]:
     """Pass the answer through and store it once it has been written completely."""
     pieces = []
     for piece in stream:
@@ -208,6 +209,7 @@ def _timed(stream: Iterator[str], trace: Trace) -> Iterator[str]:
 
 
 def ask(
+    ws: Workspace,
     question: str,
     history: list[dict],
     expand: bool = False,
@@ -221,6 +223,7 @@ def ask(
     identical chat. on_step is told each step as it starts (routing decision, searches, agent tool calls).
     scope is a list of CV file names to answer from; empty or None means all CVs.
     """
+    cache = cache_for(ws)  # this user's own: an answer cached for one user is never served to another
     question = question.strip()
     scope = sorted(set(scope or []))
     trace = Trace(expand, cache_answers)
@@ -232,17 +235,17 @@ def ask(
             trace.route = cached[2]
             return Answer(_timed(iter([cached[0]]), trace), cached[1], cached[2], trace)
         token = cache.token()
-    stream, sources, route, _ = _answer(question, history, expand, on_step, trace, scope)
+    stream, sources, route, _ = _answer(ws, cache, question, history, expand, on_step, trace, scope)
     trace.route = route
     if cache_answers:
-        stream = _remember(stream, sources, route, key, token)
+        stream = _remember(cache, stream, sources, route, key, token)
     return Answer(_timed(stream, trace), sources, route, trace)
 
 
 def _answer(
-    question: str, history: list[dict], expand: bool, on_step: Callable[[str], None], trace: Trace, scope: list[str]
+    ws: Workspace, cache: Cache, question: str, history: list[dict], expand: bool, on_step: Callable[[str], None], trace: Trace, scope: list[str]
 ) -> Answer:
-    route = _route(question, history, trace)
+    route = _route(cache, question, history, trace)
     log.info("route=%s query=%r sections=%s", route.kind, route.query, route.sections)
     if route.kind == "chat":  # no search, no sources
         on_step("Chat message, no search needed")
@@ -253,11 +256,11 @@ def _answer(
         # No chat history in the prompt: the reply is cached by the message text alone and shared by every session,
         # so it must not depend on, or carry anything from, one particular conversation.
         messages = [{"role": "system", "content": CHAT_PROMPT}, {"role": "user", "content": question}]
-        return Answer(_remember_chat(openai_service.chat_stream(messages), question, token), [], "chat")
+        return Answer(_remember_chat(cache, openai_service.chat_stream(messages), question, token), [], "chat")
     if route.kind == "complex":  # needs more than the best chunks: let the agent plan its own searches
         on_step("Complex question: planning the searches")
         try:
-            return Answer(*agent.run(route.query, _recent(history), on_step, trace, original=question, scope=scope), "complex")
+            return Answer(*agent.run(ws, route.query, _recent(history), on_step, trace, original=question, scope=scope), "complex")
         except Exception as error:  # fall back to the plain flow rather than lose the answer
             log.warning("agent failed, using a single search: %s", error)
             trace.add("agent_model", "agent failed", 0, error=str(error).splitlines()[0] if str(error) else type(error).__name__)
@@ -266,7 +269,7 @@ def _answer(
     queries = [route.query, *(_expand(route.query, trace) if expand else [])]
     on_step(f"Searching the CVs with {len(queries)} quer{'y' if len(queries) == 1 else 'ies'}")
     file_ids = [ingest.file_id_for(name) for name in scope] or None
-    sources = retrieval.retrieve(queries, route.sections, trace, file_ids)
+    sources = retrieval.retrieve(ws, queries, route.sections, trace, file_ids)
     recent = _recent(history)
 
     def messages_for(chosen: list[dict]) -> list[dict]:

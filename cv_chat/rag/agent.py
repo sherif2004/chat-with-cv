@@ -7,6 +7,7 @@ from cv_chat import config
 from cv_chat.rag import ingest, metadata, retrieval
 from cv_chat.rag.trace import Trace
 from cv_chat.services import openai_service, search_index
+from cv_chat.workspace import Workspace
 
 SYSTEM_PROMPT = """You answer questions about a set of candidate CVs by calling tools. The question may need many CVs
 (comparing, ranking, counting, listing) or have several parts, so plan your searches.
@@ -59,7 +60,8 @@ TOOLS = [
 class _Run:
     """One agent run: executes the tools and remembers every excerpt it showed the model, for the Sources list."""
 
-    def __init__(self, on_step: Callable[[str], None], trace: Trace | None = None, scope: list[str] | None = None):
+    def __init__(self, ws: Workspace, on_step: Callable[[str], None], trace: Trace | None = None, scope: list[str] | None = None):
+        self.ws = ws
         self.on_step = on_step
         self.scope = scope or []  # the CVs the user selected; empty means all
         self.trace = trace or Trace()
@@ -91,9 +93,9 @@ class _Run:
 
     def _list_cvs(self) -> str:
         """Every CV with its name, title and years of experience, so ranking by experience needs no reading."""
-        names = [name for name in ingest.list_cvs() if not self.scope or name in self.scope]
+        names = [name for name in ingest.list_cvs(self.ws) if not self.scope or name in self.scope]
         try:
-            profiles = search_index.list_profiles()
+            profiles = search_index.list_profiles(self.ws)
         except Exception:  # the plain list is still useful
             profiles = {}
         lines = [f"{name} — {metadata.profile_line(profiles[name])}" if name in profiles else name for name in names]
@@ -116,7 +118,7 @@ class _Run:
             None if min_years is None else float(min_years), None if max_years is None else float(max_years), job_title
         )
         per_cv = min(max(int(per_cv or (2 if cvs else 1)), 1), 5)
-        results = retrieval.spread_over_cvs(retrieval.search(query, [], file_ids, where, self.trace), per_cv, config.AGENT_SEARCH_K)
+        results = retrieval.spread_over_cvs(retrieval.search(self.ws, query, [], file_ids, where, self.trace), per_cv, config.AGENT_SEARCH_K)
         found = len({chunk["file_name"] for chunk in results})
         note = " (metadata filter applied)" if where else ""
         return f"{found} CV{'' if found == 1 else 's'} matched{note}.\n\n" + self._show(results)
@@ -125,7 +127,7 @@ class _Run:
         if self.scope and file_name not in self.scope:
             return f"Error: no CV named '{file_name}'. Use a file name from list_cvs."
         self.on_step(f"Reading {file_name}")
-        chunks = search_index.get_cv_chunks(ingest.file_id_for(file_name))
+        chunks = search_index.get_cv_chunks(self.ws, ingest.file_id_for(file_name))
         if not chunks:
             return f"Error: no CV named '{file_name}'. Use a file name from list_cvs."
         shown, size = [], 0
@@ -139,12 +141,12 @@ class _Run:
 
 
 def run(
-    question: str, recent: list[dict], on_step: Callable[[str], None], trace: Trace | None = None, original: str = "",
+    ws: Workspace, question: str, recent: list[dict], on_step: Callable[[str], None], trace: Trace | None = None, original: str = "",
     scope: list[str] | None = None,
 ) -> tuple[Iterator[str], list[dict]]:
     """Let the model plan and run searches for at most AGENT_MAX_ROUNDS rounds and AGENT_MAX_SECONDS seconds,
     then return (answer as a stream, sources). Out of budget, it answers from what it has found so far."""
-    state = _Run(on_step, trace, scope)
+    state = _Run(ws, on_step, trace, scope)
     asked = question if not original or original == question else (
         f"{question}\n\n(The user's original message, whose language your answer must use: {original})"
     )

@@ -6,6 +6,7 @@ so a leaked database does not give anyone a working login.
 import hashlib
 import re
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from argon2 import PasswordHasher
@@ -36,7 +37,9 @@ def _digest(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def sign_up(email: str, password: str) -> User:
+def sign_up(email: str, password: str, on_created: Callable[[User], None] | None = None) -> User:
+    """Create an account. on_created sets up the user's other resources (their Azure container and index); if it fails,
+    the account is removed again, so there are no half-made accounts."""
     email = email.strip().lower()
     if not _EMAIL.match(email) or len(email) > 254:
         raise AuthError("Enter a valid email address.")
@@ -52,7 +55,20 @@ def sign_up(email: str, password: str) -> User:
         user_id = conn.execute(
             "INSERT INTO users (email, password_hash) VALUES (%s, %s) RETURNING id", (email, password_hash)
         ).fetchone()[0]
-    return User(str(user_id), email)
+    user = User(str(user_id), email)
+    if on_created is not None:
+        try:
+            on_created(user)
+        except Exception as error:
+            delete_user(user.id)
+            raise AuthError(f"Could not set up your storage, so the account was not created: {str(error).splitlines()[0][:200]}") from error
+    return user
+
+
+def delete_user(user_id: str) -> None:
+    """Remove an account and its sessions. The caller removes the user's Azure data."""
+    with db.pool().connection() as conn:
+        conn.execute("DELETE FROM users WHERE id = %s", (user_id,))
 
 
 def log_in(email: str, password: str) -> str:

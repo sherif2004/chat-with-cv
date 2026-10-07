@@ -1,7 +1,8 @@
 """In-memory cache for repeated questions: router results, search results and (optionally) final answers.
 
+Each user has their own cache (see cache_for), so one user's answer can never be served to another.
 Chat replies (greetings, thanks) are cached by their text alone, because they do not depend on the CVs or the chat.
-Everything is cleared when the CVs change. An entry computed while a CV was being changed is not stored (see token).
+Everything is cleared when the user's CVs change. An entry computed while a CV was being changed is not stored (see token).
 """
 import threading
 from collections import OrderedDict
@@ -9,6 +10,7 @@ from collections.abc import Hashable
 from typing import Any
 
 from cv_chat import config
+from cv_chat.workspace import Workspace
 
 ROUTE, SEARCH, ANSWER, CHAT = "route", "search", "answer", "chat"
 
@@ -53,4 +55,13 @@ class Cache:
             return sum(len(entries) for entries in self._data.values())
 
 
-cache = Cache(config.CACHE_SIZE)
+_caches: dict[str, Cache] = {}
+_caches_lock = threading.Lock()
+
+
+def cache_for(ws: Workspace) -> Cache:
+    """The cache of one user."""
+    with _caches_lock:
+        if ws.user_id not in _caches:
+            _caches[ws.user_id] = Cache(config.CACHE_SIZE)
+        return _caches[ws.user_id]

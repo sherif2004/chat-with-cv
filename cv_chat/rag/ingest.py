@@ -5,8 +5,7 @@ CVs are processed in parallel threads: the work is I/O-bound (HTTP calls to Azur
 import hashlib
 from functools import lru_cache
 from pathlib import Path
-from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable
 
 from cv_chat import config
 from cv_chat.processing import chunking, extract, sections
@@ -14,8 +13,9 @@ from cv_chat.processing.chunking import chunk_cv
 from cv_chat.processing.extract import extract_cv
 from cv_chat.processing.sections import section_type
 from cv_chat.rag import metadata
-from cv_chat.rag.cache import cache
+from cv_chat.rag.cache import cache_for
 from cv_chat.services import blob_storage, openai_service, search_index
+from cv_chat.workspace import Workspace
 
 
 @lru_cache(maxsize=1)
@@ -33,7 +33,7 @@ def file_id_for(file_name: str) -> str:
 
 
 def process_cv(
-    file_name: str, data: bytes, force: bool = False, on_stage: Callable[[str], None] = lambda stage: None
+    ws: Workspace, file_name: str, data: bytes, force: bool = False, on_stage: Callable[[str], None] = lambda stage: None
 ) -> tuple[int, bool]:
     """Index one CV and store the original file. Returns (chunks, skipped); skipped means it was already indexed.
 
@@ -41,7 +41,7 @@ def process_cv(
     """
     file_id = file_id_for(file_name)
     content_hash = hashlib.md5(data + _pipeline_fingerprint()).hexdigest()
-    if not force and search_index.get_hash(file_id) == content_hash:
+    if not force and search_index.get_hash(ws, file_id) == content_hash:
         return 0, True
 
     on_stage("reading layout")
@@ -66,48 +66,40 @@ def process_cv(
         for i, (chunk, vector) in enumerate(zip(chunks, vectors))
     ]
     on_stage("saving")
-    search_index.upload_chunks(docs)  # upload first, then drop leftovers, so the CV is never missing from the index
-    search_index.delete_stale_chunks(file_id, {doc["id"] for doc in docs})
-    blob_storage.upload_file(file_name, data)
-    cache.clear()  # cached searches and answers may not know this CV's new content
+    search_index.upload_chunks(ws, docs)  # upload first, then drop leftovers, so the CV is never missing from the index
+    search_index.delete_stale_chunks(ws, file_id, {doc["id"] for doc in docs})
+    blob_storage.upload_file(ws, file_name, data)
+    cache_for(ws).clear()  # cached searches and answers may not know this CV's new content
     return len(chunks), False
 
 
-def delete_cv(file_name: str) -> None:
+def delete_cv(ws: Workspace, file_name: str) -> None:
     """Remove a CV everywhere. The index goes first: a CV left in the index but not in storage would still be quoted."""
     try:
-        search_index.delete_file_chunks(file_id_for(file_name))
-        blob_storage.delete_file(file_name)
+        search_index.delete_file_chunks(ws, file_id_for(file_name))
+        blob_storage.delete_file(ws, file_name)
     finally:  # even a half-finished delete changes what a search returns
-        cache.clear()
+        cache_for(ws).clear()
 
 
-def prepare() -> None:
-    """Create the search index, or bring an older one up to the current fields, before anything searches it."""
-    search_index.ensure_index(openai_service.embedding_dimensions())
+def prepare(ws: Workspace) -> None:
+    """Create the user's container and search index, or bring an older index up to the current fields, before anything uses them."""
+    blob_storage.ensure_container(ws)
+    search_index.ensure_index(ws, openai_service.embedding_dimensions())
 
 
-def process_cvs(files: list[tuple[str, bytes]]) -> Iterator[dict]:
-    """Process (file_name, data) pairs in parallel and yield each file's result as soon as it finishes."""
-    blob_storage.ensure_container()
-    prepare()
-    remove_deleted_cvs()  # before any file runs: a file in progress is in the index before it reaches Blob Storage
-    with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as pool:
-        futures = {pool.submit(process_cv, name, data): name for name, data in files}
-        for future in as_completed(futures):
-            try:
-                chunks, skipped = future.result()
-                result = {"file": futures[future], "chunks": chunks, "skipped": skipped, "error": None}
-            except Exception as error:  # one bad file never stops the others
-                result = {"file": futures[future], "chunks": 0, "skipped": False, "error": str(error)}
-            yield result
+def destroy(ws: Workspace) -> None:
+    """Delete everything a user has in Azure: their container (the original CVs) and their search index."""
+    search_index.delete_index(ws)
+    blob_storage.delete_container(ws)
+    cache_for(ws).clear()
 
 
-def remove_deleted_cvs() -> None:
+def remove_deleted_cvs(ws: Workspace) -> None:
     """Delete the index chunks of CVs whose file is no longer in Blob Storage (for example deleted in the portal)."""
-    files = set(blob_storage.list_files())
-    search_index.delete_chunks([chunk_id for chunk_id, name in search_index.list_chunks() if name not in files])
+    files = set(blob_storage.list_files(ws))
+    search_index.delete_chunks(ws, [chunk_id for chunk_id, name in search_index.list_chunks(ws) if name not in files])
 
 
-def list_cvs() -> list[str]:
-    return blob_storage.list_files()
+def list_cvs(ws: Workspace) -> list[str]:
+    return blob_storage.list_files(ws)

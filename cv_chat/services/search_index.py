@@ -1,5 +1,6 @@
 """Azure AI Search: the searchable index of CV chunks and their embeddings."""
 import logging
+from functools import lru_cache
 
 from azure.core.credentials import AzureKeyCredential
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
@@ -27,6 +28,7 @@ from azure.search.documents.indexes.models import (
 from azure.search.documents.models import VectorizedQuery
 
 from cv_chat import config
+from cv_chat.workspace import Workspace
 
 log = logging.getLogger(__name__)
 SEMANTIC_CONFIG = "default"
@@ -37,14 +39,29 @@ ANALYZER = "en.microsoft"  # English stemming and stop words for keyword search 
 
 _credential = AzureKeyCredential(config.SEARCH_KEY)
 _index_client = SearchIndexClient(config.SEARCH_ENDPOINT, _credential)
-_search_client = SearchClient(config.SEARCH_ENDPOINT, config.SEARCH_INDEX, _credential)
 
 
-def _existing_index() -> SearchIndex | None:
+@lru_cache(maxsize=64)
+def _search_client_for(index: str) -> SearchClient:
+    return SearchClient(config.SEARCH_ENDPOINT, index, _credential)
+
+
+def _client(ws: Workspace) -> SearchClient:
+    return _search_client_for(ws.index)
+
+
+def _existing_index(ws: Workspace) -> SearchIndex | None:
     try:
-        return _index_client.get_index(config.SEARCH_INDEX)
+        return _index_client.get_index(ws.index)
     except ResourceNotFoundError:
         return None
+
+
+def delete_index(ws: Workspace) -> None:
+    try:
+        _index_client.delete_index(ws.index)
+    except ResourceNotFoundError:
+        pass
 
 
 def _outdated_settings(index: SearchIndex) -> list[str]:
@@ -65,20 +82,20 @@ def _outdated_settings(index: SearchIndex) -> list[str]:
     return problems
 
 
-def ensure_index(dimensions: int) -> None:
+def ensure_index(ws: Workspace, dimensions: int) -> None:
     """Create the index (vectors of the given length), or update it in place if it already exists."""
-    existing = _existing_index()
+    existing = _existing_index(ws)
     if existing is not None:
         existing_dimensions = next((f.vector_search_dimensions for f in existing.fields if f.name == "content_vector"), None)
         if existing_dimensions is not None and existing_dimensions != dimensions:
             raise RuntimeError(
-                f"The index '{config.SEARCH_INDEX}' stores vectors of length {existing_dimensions}, but the embedding model returns "
-                f"{dimensions}. Delete the index in the Azure portal or set a new AZURE_SEARCH_INDEX in .env, then process the CVs again."
+                f"The index '{ws.index}' stores vectors of length {existing_dimensions}, but the embedding model returns "
+                f"{dimensions}. Delete the index in the Azure portal, then process the CVs again."
             )
         if problems := _outdated_settings(existing):
             raise RuntimeError(
-                f"The index '{config.SEARCH_INDEX}' was made by an older version: {'; '.join(problems)}. Azure cannot change "
-                "this in place. Delete the index in the Azure portal (or set a new AZURE_SEARCH_INDEX in .env), restart the app, "
+                f"The index '{ws.index}' was made by an older version: {'; '.join(problems)}. Azure cannot change "
+                "this in place. Delete the index in the Azure portal, restart the app, "
                 "then click Update outdated CVs to index the stored CVs again."
             )
     fields = [
@@ -126,40 +143,40 @@ def ensure_index(dimensions: int) -> None:
         function_aggregation="sum",
     )]
     _index_client.create_or_update_index(SearchIndex(
-        name=config.SEARCH_INDEX, fields=fields, vector_search=vector_search, semantic_search=semantic_search,
+        name=ws.index, fields=fields, vector_search=vector_search, semantic_search=semantic_search,
         scoring_profiles=scoring_profiles,
     ))
 
 
-def upload_chunks(docs: list[dict]) -> None:
-    results = _search_client.upload_documents(docs)
+def upload_chunks(ws: Workspace, docs: list[dict]) -> None:
+    results = _client(ws).upload_documents(docs)
     failed = [result.key for result in results if not result.succeeded]
     if failed:
         raise RuntimeError(f"Search index rejected {len(failed)} chunk(s), e.g. {failed[0]}")
 
 
-def get_hash(file_id: str) -> str | None:
+def get_hash(ws: Workspace, file_id: str) -> str | None:
     """The content hash stored for a file, or None if it is not indexed or its chunks disagree (interrupted run)."""
-    results = _search_client.search("*", filter=f"file_id eq '{file_id}'", select=["content_hash"])
+    results = _client(ws).search("*", filter=f"file_id eq '{file_id}'", select=["content_hash"])
     hashes = {result["content_hash"] for result in results}
     return hashes.pop() if len(hashes) == 1 else None
 
 
-def delete_stale_chunks(file_id: str, keep_ids: set[str]) -> None:
+def delete_stale_chunks(ws: Workspace, file_id: str, keep_ids: set[str]) -> None:
     """After re-indexing a changed file: drop chunks the new version no longer has."""
-    results = _search_client.search("*", filter=f"file_id eq '{file_id}'", select=["id"])
+    results = _client(ws).search("*", filter=f"file_id eq '{file_id}'", select=["id"])
     stale = [{"id": result["id"]} for result in results if result["id"] not in keep_ids]
     for start in range(0, len(stale), 500):
-        _search_client.delete_documents(stale[start : start + 500])
+        _client(ws).delete_documents(stale[start : start + 500])
 
 
-def delete_file_chunks(file_id: str) -> None:
-    delete_stale_chunks(file_id, set())
+def delete_file_chunks(ws: Workspace, file_id: str) -> None:
+    delete_stale_chunks(ws, file_id, set())
 
 
-def list_profiles() -> dict[str, dict]:
+def list_profiles(ws: Workspace) -> dict[str, dict]:
     """The metadata of every indexed CV, by file name (read from one chunk of each CV)."""
-    results = _search_client.search("*", select=["file_name", *META_FIELDS], top=1000)
+    results = _client(ws).search("*", select=["file_name", *META_FIELDS], top=1000)
     profiles: dict[str, dict] = {}
     for result in results:
         profiles.setdefault(result["file_name"], {name: result.get(name) for name in META_FIELDS})
@@ -178,19 +195,19 @@ def metadata_filter(min_years: float | None = None, max_years: float | None = No
     return " and ".join(parts) or None
 
 
-def list_chunks() -> list[tuple[str, str]]:
+def list_chunks(ws: Workspace) -> list[tuple[str, str]]:
     """(chunk id, file name) for every chunk in the index."""
-    return [(result["id"], result["file_name"]) for result in _search_client.search("*", select=["id", "file_name"])]
+    return [(result["id"], result["file_name"]) for result in _client(ws).search("*", select=["id", "file_name"])]
 
 
-def delete_chunks(ids: list[str]) -> None:
+def delete_chunks(ws: Workspace, ids: list[str]) -> None:
     if ids:
-        _search_client.delete_documents([{"id": chunk_id} for chunk_id in ids])
+        _client(ws).delete_documents([{"id": chunk_id} for chunk_id in ids])
 
 
-def get_cv_chunks(file_id: str) -> list[dict]:
+def get_cv_chunks(ws: Workspace, file_id: str) -> list[dict]:
     """Every chunk of one CV in reading order."""
-    results = _search_client.search(
+    results = _client(ws).search(
         "*", filter=f"file_id eq '{file_id}'", select=["id", "file_name", "section", "page", "content", *META_FIELDS], top=1000
     )
     chunks = sorted(results, key=lambda r: int(r["id"].rsplit("-", 1)[1]))  # the id ends with the chunk's position
@@ -202,6 +219,7 @@ def get_cv_chunks(file_id: str) -> list[dict]:
 
 
 def hybrid_search(
+    ws: Workspace,
     text: str,
     vector: list[float],
     k: int,
@@ -232,7 +250,7 @@ def hybrid_search(
         top=k,
     )
     try:
-        results = list(_search_client.search(
+        results = list(_client(ws).search(
             query_type="semantic",
             semantic_configuration_name=SEMANTIC_CONFIG,
             query_caption="extractive|highlight-false",  # the passage the ranker found most relevant, for Sources
@@ -243,7 +261,7 @@ def hybrid_search(
             raise
         # The service has no semantic ranker (Free tier, or switched off): keep answering with plain hybrid search.
         log.warning("semantic ranker unavailable, using hybrid search only: %s", str(error).splitlines()[0])
-        results = list(_search_client.search(**kwargs))
+        results = list(_client(ws).search(**kwargs))
     found = []
     for result in results:
         captions = result.get("@search.captions") or []
