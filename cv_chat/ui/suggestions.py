@@ -1,7 +1,6 @@
-"""Starter questions for the welcome screen, built from the CVs that are indexed (their job titles, years and places).
+"""Starter questions for the welcome screen, built from the CVs that are indexed (their job titles and places).
 No model call. Anything that does not look like plain words is left out, because it ends up as text on a button."""
 import re
-import statistics
 from collections import Counter
 
 FIXED = [
@@ -26,11 +25,6 @@ def _plural(word: str) -> str:
 def build(candidates: list[dict]) -> list[str]:
     """Up to COUNT questions: the ones the data suggests first, then the fixed ones to fill the rest."""
     questions: list[str] = []
-
-    years = [c["years"] for c in candidates if c.get("years") is not None]
-    if len(years) >= 3:
-        threshold = max(5, round(statistics.median(years) / 5) * 5)
-        questions.append(f"Who has more than {threshold} years of experience?")
 
     words = Counter(
         word.capitalize()

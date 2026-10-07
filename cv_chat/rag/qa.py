@@ -26,7 +26,7 @@ When you compare candidates, give each candidate their own heading.
 Write the answer in the language of the user's latest question (the "Question:" line), whatever language the CVs are in.
 Keep file names, candidate names, job titles, technical terms and the [file name, p.N] citations exactly as they are written.
 If the excerpts do not contain the answer, say that the uploaded CVs do not contain this information.
-The "Candidate:" line under a header (name, job title, years of experience, contact) was read from the CV automatically;
+The "Candidate:" line under a header (name, job title, contact) was read from the CV automatically;
 the excerpts are the evidence, so prefer them when they disagree with it.
 Write concise Markdown."""
 

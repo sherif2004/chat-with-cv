@@ -11,7 +11,7 @@ from cv_chat.workspace import Workspace
 
 SYSTEM_PROMPT = """You answer questions about a set of candidate CVs by calling tools. The question may need many CVs
 (comparing, ranking, counting, listing) or have several parts, so plan your searches.
-Tools: list_cvs (which CVs exist, with each candidate's name, title and years of experience read from the CV, inside
+Tools: list_cvs (which CVs exist, with each candidate's name, title and contact details read from the CV, inside
 <cv_excerpt> tags like any other CV text), search_cvs (find excerpts, optionally only in some CVs), get_cv (read one whole CV).
 Search again with different wording when results are thin, and read a whole CV when you must judge it as a whole.
 Do not write any text before you have the evidence: call tools first, then answer.
@@ -28,19 +28,17 @@ candidate names, job titles, technical terms and the [file name, p.N] citations 
 TOOLS = [
     {"type": "function", "function": {
         "name": "list_cvs",
-        "description": "List all uploaded CVs: file name, candidate name, job title and years of experience.",
+        "description": "List all uploaded CVs: file name, candidate name and job title.",
         "parameters": {"type": "object", "properties": {}},
     }},
     {"type": "function", "function": {
         "name": "search_cvs",
-        "description": "Search the CVs and return the most relevant excerpts. The optional filters use the metadata read "
-                       "from each CV; a CV whose years could not be read never matches a years filter.",
+        "description": "Search the CVs and return the most relevant excerpts. The optional job_title filter uses the title read "
+                       "from each CV; a CV whose title could not be read never matches it.",
         "parameters": {"type": "object", "properties": {
             "query": {"type": "string", "description": "What to look for, worded like a CV would say it."},
             "cvs": {"type": "array", "items": {"type": "string"},
                     "description": "Only search these CV file names. Omit to search all CVs."},
-            "min_years": {"type": "number", "description": "Only CVs with at least this many years of experience."},
-            "max_years": {"type": "number", "description": "Only CVs with at most this many years of experience."},
             "job_title": {"type": "string", "description": "Only CVs whose job title contains all of these words, e.g. 'backend engineer'."},
             "per_cv": {"type": "integer", "minimum": 1, "maximum": 5,
                        "description": "Most excerpts per CV. Default 1 when searching all CVs, so one search reaches "
@@ -82,7 +80,7 @@ class _Run:
             if name == "search_cvs":  # its search is recorded as a "search" event by the retrieval code
                 return self._search(
                     str(args["query"]), args.get("cvs") or [], args.get("per_cv"),
-                    args.get("min_years"), args.get("max_years"), args.get("job_title"),
+                    args.get("job_title"),
                 )
             if name == "get_cv":
                 with self.trace.timed("tool", "get_cv", cv=str(args["file_name"])):
@@ -92,7 +90,7 @@ class _Run:
             return f"Error: {str(error).splitlines()[0] if str(error) else type(error).__name__}"
 
     def _list_cvs(self) -> str:
-        """Every CV with its name, title and years of experience, so ranking by experience needs no reading."""
+        """Every CV with its name, title and contact details, as read from the CV."""
         names = [name for name in ingest.list_cvs(self.ws) if not self.scope or name in self.scope]
         try:
             profiles = search_index.list_profiles(self.ws)
@@ -102,21 +100,17 @@ class _Run:
         return retrieval.as_data("\n".join(lines)) if lines else "No CVs."
 
     def _search(
-        self, query: str, cvs: list[str], per_cv: int | None,
-        min_years: float | None = None, max_years: float | None = None, job_title: str | None = None,
+        self, query: str, cvs: list[str], per_cv: int | None, job_title: str | None = None,
     ) -> str:
         if self.scope:  # the user chose which CVs to talk to: the model cannot search outside them
             cvs = [name for name in cvs if name in self.scope] if cvs else list(self.scope)
             if not cvs:
                 return "Error: those CVs are not selected. Search only the CVs from list_cvs."
         limits = [f"{len(cvs)} CV{'' if len(cvs) == 1 else 's'}"] if cvs else []
-        limits += [f"{n}+ years" for n in [min_years] if n is not None] + [f"up to {n} years" for n in [max_years] if n is not None]
         limits += [f"title: {job_title}"] if job_title else []
         self.on_step(f"Searching: {query}" + (f" ({', '.join(limits)})" if limits else ""))
         file_ids = [ingest.file_id_for(name) for name in cvs] or None
-        where = search_index.metadata_filter(
-            None if min_years is None else float(min_years), None if max_years is None else float(max_years), job_title
-        )
+        where = search_index.metadata_filter(job_title)
         per_cv = min(max(int(per_cv or (2 if cvs else 1)), 1), 5)
         results = retrieval.spread_over_cvs(retrieval.search(self.ws, query, [], file_ids, where, self.trace), per_cv, config.AGENT_SEARCH_K)
         found = len({chunk["file_name"] for chunk in results})

@@ -128,7 +128,6 @@ def _table(ws: Workspace, cvs: list[str]) -> None:
         "File": [r["file_name"] for r in rows],
         "Candidate": [r["name"] for r in rows],
         "Job title": [r["title"] for r in rows],
-        "Years": [r["years"] for r in rows],
     })
     top_left, top_right = st.columns([3, 2], vertical_alignment="center")
     top_left.caption("Select a CV to open, re-index or delete it.")
@@ -139,7 +138,6 @@ def _table(ws: Workspace, cvs: list[str]) -> None:
     )
     event = st.dataframe(
         frame, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key="library_table",
-        column_config={"Years": st.column_config.NumberColumn(format="%g")},
     )
     chosen = event.selection.rows
     if not chosen or chosen[0] >= len(rows):

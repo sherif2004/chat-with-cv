@@ -89,7 +89,7 @@ def _warm_up() -> None:
     try:
         from cv_chat.processing import entities
 
-        entities.warm_up()  # the spaCy model (about a second)
+        entities.warm_up()  # the NER model (downloaded the first time)
         with _lock:
             _get_converter()
         log.info("docling is loaded")

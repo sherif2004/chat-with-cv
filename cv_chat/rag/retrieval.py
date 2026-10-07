@@ -148,7 +148,7 @@ def as_data(text: str) -> str:
 def format_excerpt(chunk: dict, with_profile: bool = False) -> str:
     """A chunk as the model sees it: a header naming its CV, section and page, then the text, inside <cv_excerpt> tags.
 
-    with_profile adds one line about the candidate (name, title, years, contact). The tags mark the text as data (see
+    with_profile adds one line about the candidate (name, title, contact). The tags mark the text as data (see
     the system prompts), and tags inside the CV text are removed, so a CV cannot close the block early and pass its
     own text off as instructions.
     """

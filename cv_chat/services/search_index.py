@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 SEMANTIC_CONFIG = "default"
 SCORING_PROFILE = "cv"
 BOOSTED_SECTIONS = ["experience", "skills"]  # chunks from these sections rank a little higher for keyword matches
-META_FIELDS = ["candidate_name", "job_title", "years_experience", "email", "phone", "location"]
+META_FIELDS = ["candidate_name", "job_title", "email", "phone", "location"]
 ANALYZER = "en.microsoft"  # English stemming and stop words for keyword search ("built" also finds "building")
 
 _credential = AzureKeyCredential(config.SEARCH_KEY)
@@ -73,7 +73,7 @@ def _outdated_settings(index: SearchIndex) -> list[str]:
     if not getattr(fields.get("file_name"), "filterable", False):
         problems.append("'file_name' is not filterable")
     if "candidate_name" not in fields:
-        problems.append("the CV metadata fields (candidate name, job title, years, contact) are missing")
+        problems.append("the CV metadata fields (candidate name, job title, contact) are missing")
     if not any(profile.name == SCORING_PROFILE for profile in index.scoring_profiles or []):
         problems.append("the scoring profile that boosts names, titles and sections is missing")
     algorithms = index.vector_search.algorithms if index.vector_search else []
@@ -116,7 +116,6 @@ def ensure_index(ws: Workspace, dimensions: int) -> None:
         SimpleField(name="content_hash", type=SearchFieldDataType.String),
         SearchableField(name="candidate_name", filterable=True),
         SearchableField(name="job_title", filterable=True),
-        SimpleField(name="years_experience", type=SearchFieldDataType.Double, filterable=True, sortable=True),
         SimpleField(name="email", type=SearchFieldDataType.String),
         SimpleField(name="phone", type=SearchFieldDataType.String),
         SimpleField(name="location", type=SearchFieldDataType.String),
@@ -193,16 +192,11 @@ def list_profiles(ws: Workspace) -> dict[str, dict]:
     return profiles
 
 
-def metadata_filter(min_years: float | None = None, max_years: float | None = None, job_title: str | None = None) -> str | None:
-    """An OData filter on the CV metadata. CVs whose years could not be read never match a years filter."""
-    parts = []
-    if min_years is not None:
-        parts.append(f"years_experience ge {float(min_years)}")
-    if max_years is not None:
-        parts.append(f"years_experience le {float(max_years)}")
+def metadata_filter(job_title: str | None = None) -> str | None:
+    """An OData filter on the CV metadata: every word of the job title must appear in the title read from the CV."""
     if job_title and (words := " ".join(job_title.replace("'", " ").split())):
-        parts.append(f"search.ismatch('{words}', 'job_title', 'simple', 'all')")  # every word must appear in the title
-    return " and ".join(parts) or None
+        return f"search.ismatch('{words}', 'job_title', 'simple', 'all')"
+    return None
 
 
 def list_chunks(ws: Workspace) -> list[tuple[str, str]]:

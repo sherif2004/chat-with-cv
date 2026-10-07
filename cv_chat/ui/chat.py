@@ -93,7 +93,7 @@ def _welcome(ws: Workspace, cvs: list[str], has_cvs: bool) -> None:
 
 
 def _starter_questions(ws: Workspace, cvs: list[str]) -> list[str]:
-    """Questions built from these CVs' titles, years and places; the fixed ones if that is not possible."""
+    """Questions built from these CVs' titles and places; the fixed ones if that is not possible."""
     try:
         return suggestions.build(candidates.candidate_list(ws, cvs))
     except Exception:  # starter questions are a nicety: never let them break the welcome screen
@@ -247,8 +247,7 @@ def _sources(ws: Workspace, sources: list[dict]) -> None:
                 name_column.markdown(f"**{safe.esc(first.get('candidate_name') or file_name)}**")
                 if link := _link(ws, file_name):
                     link_column.link_button("Open", link, icon=":material/open_in_new:", width="stretch")
-                years = first.get("years_experience")
-                facts = [first.get("job_title"), f"{years:g} years" if years is not None else "", file_name]
+                facts = [first.get("job_title"), file_name]
                 st.caption(" · ".join(safe.esc(fact) for fact in facts if fact))
                 for chunk in chunks[:2]:
                     snippet = " ".join((chunk.get("caption") or chunk["content"]).split())

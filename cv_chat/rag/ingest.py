@@ -64,8 +64,8 @@ def process_cv(
         raise ValueError("No text found (scanned PDF?)")
 
     chunks = chunk_cv(document.pages, document.headers, config.CHUNK_SIZE, config.CHUNK_OVERLAP)
-    on_stage("reading name, title and experience")
-    meta = entities.extract(document.pages, chunks, file_name=file_name)
+    on_stage("reading name, title and contact")
+    meta = entities.extract(document.pages)
     on_stage("embedding")
     # Embed each chunk together with its file name, so chunks from later pages still point to the candidate.
     who = f"\nCandidate: {meta['candidate_name']}, {meta['job_title']}" if meta["candidate_name"] else ""

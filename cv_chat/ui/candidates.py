@@ -1,4 +1,4 @@
-"""Candidates view: one card per CV, with the name, title, years and location read from the CV."""
+"""Candidates view: one card per CV, with the name, title and location read from the CV."""
 import pandas as pd
 import streamlit as st
 
@@ -7,7 +7,7 @@ from cv_chat.ui import states
 from cv_chat.ui.safe import esc
 from cv_chat.workspace import Workspace
 
-SORTS = {"Name": lambda c: (c["name"] or c["file_name"]).lower(), "Most experience": lambda c: -(c["years"] or -1), "Least experience": lambda c: c["years"] if c["years"] is not None else 1e9}
+SORTS = {"Name": lambda c: (c["name"] or c["file_name"]).lower(), "Job title": lambda c: (c["title"] or "~").lower(), "Location": lambda c: (c["location"] or "~").lower()}
 COLUMNS = 3
 MAX_COMPARE = 3  # candidates that can be compared side by side
 
@@ -28,7 +28,7 @@ def candidate_list(ws: Workspace, cvs: list[str]) -> list[dict]:
         profile = profiles.get(file_name) or {}
         found.append({
             "file_name": file_name, "name": profile.get("candidate_name") or "", "title": profile.get("job_title") or "",
-            "years": profile.get("years_experience"), "location": profile.get("location") or "", "email": profile.get("email") or "",
+            "location": profile.get("location") or "", "email": profile.get("email") or "",
         })
     return found
 
@@ -38,16 +38,13 @@ def render(ws: Workspace, cvs: list[str]) -> None:
         states.empty("No CVs yet. Add some in the Library and they will show up here as cards.", "Open the Library", _open_library, icon=":material/upload_file:")
         return
     candidates = candidate_list(ws, cvs)
-    search_column, years_column, sort_column = st.columns([3, 2, 2])
+    search_column, sort_column = st.columns([3, 2])
     text = search_column.text_input("Filter", placeholder="Name, title, location or file", label_visibility="collapsed", key="candidate_filter").strip().lower()
-    st.session_state.setdefault("candidate_min_years", 0)  # no value= below: "Clear the filters" resets it through session state
-    min_years = years_column.number_input("Minimum years", min_value=0, max_value=60, step=1, help="Minimum years of experience", key="candidate_min_years")
     sort = sort_column.selectbox("Sort", list(SORTS), label_visibility="collapsed")
 
     shown = [
         c for c in candidates
-        if (not text or text in " ".join([c["name"], c["title"], c["location"], c["file_name"]]).lower())
-        and (not min_years or (c["years"] is not None and c["years"] >= min_years))  # years that could not be read never match
+        if not text or text in " ".join([c["name"], c["title"], c["location"], c["file_name"]]).lower()
     ]
     shown.sort(key=SORTS[sort])
     st.caption(f"{len(shown)} of {len(candidates)} candidates")
@@ -70,8 +67,6 @@ def _card(ws: Workspace, c: dict, full: bool = False) -> None:
         st.markdown(f"**{esc(c['name'] or c['file_name'])}**")
         if c["title"]:
             st.caption(esc(c["title"]))
-        if c["years"] is not None:
-            st.markdown(f":material/work: {c['years']:g} years")
         if c["location"]:
             st.markdown(f":material/location_on: {esc(c['location'])}")
         if c["email"]:
@@ -93,10 +88,10 @@ def _compare(chosen: list[dict]) -> None:
     labels = [c["name"] or c["file_name"] for c in chosen]
     frame = pd.DataFrame(
         {
-            label: [c["title"] or "-", "-" if c["years"] is None else f"{c['years']:g}", c["location"] or "-", c["email"] or "-", c["file_name"]]
+            label: [c["title"] or "-", c["location"] or "-", c["email"] or "-", c["file_name"]]
             for label, c in zip(labels, chosen)
         },
-        index=["Job title", "Years of experience", "Location", "Email", "File"],
+        index=["Job title", "Location", "Email", "File"],
     )
     with st.container(border=True):
         st.markdown(f"**Comparing {len(chosen)} candidates**")
@@ -125,7 +120,6 @@ def _clear_comparison() -> None:
 
 def _clear_filters() -> None:
     st.session_state["candidate_filter"] = ""
-    st.session_state["candidate_min_years"] = 0
 
 
 def _open_library() -> None:
