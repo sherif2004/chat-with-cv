@@ -6,13 +6,13 @@ st.set_page_config(page_title="CV Chat", page_icon=":material/description:")
 from cv_chat.ui import accounts
 
 user = accounts.current_user()  # shows the login screen and stops the page until someone is logged in
-accounts.logout_button()
+accounts.account_menu(user)
 
 try:
     from cv_chat import config
     from cv_chat.workspace import Workspace
     from cv_chat.rag import ingest
-    from cv_chat.ui import chat, sidebar
+    from cv_chat.ui import candidates, chat, sidebar
 except KeyError as missing:  # config.py raises KeyError for a value missing from .env
     st.error(f"Missing {missing} in .env. Copy .env.example to .env and fill in your Azure values.", icon=":material/error:")
     st.stop()
@@ -36,4 +36,8 @@ except Exception as error:  # for example an index built for a different embeddi
 
 st.session_state.setdefault("messages", [])
 cvs = sidebar.render(ws)
-chat.render(ws, has_cvs=len(cvs) >= config.MIN_CVS)
+view = st.segmented_control("View", ["Chat", "Candidates"], key="view", default="Chat", label_visibility="collapsed")
+if view == "Candidates":
+    candidates.render(ws, cvs)
+else:  # only the chosen view is drawn, so the Candidates page costs nothing while you chat
+    chat.render(ws, has_cvs=len(cvs) >= config.MIN_CVS)

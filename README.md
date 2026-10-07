@@ -21,6 +21,7 @@ Every answer comes from the uploaded CVs, is written in the language you asked i
 - [How it works](#how-it-works)
 - [Quick start](#quick-start)
 - [Using the app](#using-the-app)
+- [Accounts and Postgres](#accounts-and-postgres)
 - [Project structure](#project-structure)
 - [Configuration](#configuration)
 - [Good to know](#good-to-know)
@@ -34,6 +35,7 @@ Every answer comes from the uploaded CVs, is written in the language you asked i
 
 | Step | What you do | What the app does |
 |---|---|---|
+| 0. Account | Sign up or log in | Gives you your own CV storage, search index and saved chats |
 | 1. Upload | Drop PDF or DOCX CVs in the sidebar (at least 8 in total) | Reads and stores them |
 | 2. Process | Click **Process CVs** | Reads each CV's layout, splits it by section and makes it searchable, several CVs at the same time. CVs that are already indexed and unchanged are skipped |
 | 3. Ask | Type a question in the chat, in any language | Works out what kind of question it is, finds the relevant parts of the CVs (or plans several searches for a complex question) and streams an answer in your language, with `[file, p.N]` citations |
@@ -114,15 +116,16 @@ Any text that comes from a CV is treated as data, not as instructions (see [Safe
 
 `uv run streamlit run app.py` starts [app.py](app.py). Streamlit runs that file from top to bottom at startup and again on every click or message:
 
-1. Load the settings and connect to Azure (a missing `.env` value shows a clear error).
-2. Draw the sidebar with the upload box, the **Process CVs** button and the list of CVs already in Azure.
-3. Draw the chat area: the welcome screen with suggested questions, or the conversation so far.
+1. Show the login and sign-up screen until someone is logged in (a session cookie keeps you logged in).
+2. Load the settings and connect to Azure (a missing `.env` value shows a clear error), and make sure this user's container and index exist.
+3. Draw the sidebar: account menu, chats, upload box, **Process CVs** button and the list of CVs.
+4. Draw the main area: the **Chat** or **Candidates** view.
 
 ---
 
 ## Accounts and Postgres
 
-Users sign up and log in with an email and password. Accounts and sessions are stored in Postgres, which runs in Docker:
+Users sign up and log in with an email and password. Accounts, sessions and chats are stored in Postgres, which runs in Docker:
 
 ```bash
 docker compose up -d          # starts Postgres on 127.0.0.1:5432
@@ -130,9 +133,23 @@ cp .env.example .env          # DATABASE_URL is already filled in for this setup
 uv run streamlit run app.py
 ```
 
-Passwords are stored as argon2 hashes. A login is a random token in a browser cookie; only its hash is stored in the database, and it expires after 14 days or when you log out. Sign-ups are capped at 15 users (one search index per user is planned, and the Azure Basic tier allows 15).
+Passwords are stored as argon2 hashes. A login is a random token in a browser cookie; only its hash is stored in the database, and it expires after 14 days or when you log out. Sign-ups are capped at 15 users, because each user gets their own search index and the Azure Basic tier allows 15.
 
-To run the tests: `uv run pytest`. They use a separate `cvchat_test` database that they create themselves.
+### Account menu
+
+Your email at the top of the sidebar opens the account menu:
+
+- **Log out** ends this session.
+- **Change password** asks for the current password and logs you out on your other devices.
+- **Delete my account** (you type your email to confirm) deletes your CVs, your search index, your saved chats and your account. Azure data is deleted first: if that fails, nothing else is removed and you can try again. It waits until CVs that are being processed have finished.
+
+### Chats
+
+Every answer is saved. **New chat** starts a fresh one, and past chats are listed below it (newest first). Click one to reopen it with its sources and details, or use its menu to rename or delete it. The model still only sees the last few messages of a chat.
+
+### Candidates view
+
+The **Candidates** switch above the chat shows one card per CV with the name, job title, years of experience, location and email read from the CV. Filter by text, set a minimum number of years, sort by name or experience, open the original CV, or press **Chat with this CV** to answer only from it. It reads the metadata of the first 1000 indexed chunks, so with very many CVs some may show without details.
 
 ### Each user has their own data
 
@@ -149,8 +166,6 @@ Every chunk is stored with the plain Blob address of its CV (`file_url`) next to
 CVs indexed before this feature have no address yet. Press **Update outdated CVs** to index them again.
 
 File names from uploads must be plain names: no `/` or `\`, no control characters, not `.` or `..`, at most 200 characters. Other files are shown as failed in the status panel.
-
-**Status:** login, sign-up and per-user data are done. Chat history in Postgres, NER extraction and the UI changes are the next steps (see `docs/superpowers/specs/2026-10-07-accounts-design.md`).
 
 ---
 
@@ -183,25 +198,26 @@ cp .env.example .env
 | Variable | Where to find it in the Azure portal |
 |---|---|
 | `AZURE_STORAGE_CONNECTION_STRING` | Storage account, **Security + networking**, **Access keys**, connection string |
-| `AZURE_STORAGE_CONTAINER` | A name you choose, for example `cvs`. It is created automatically |
+| `AZURE_STORAGE_CONTAINER` | A name prefix you choose, for example `cvs`. Each user gets `<prefix>-<user id>`, created at sign-up |
 | `AZURE_SEARCH_ENDPOINT` | AI Search service, **Overview**, **Url** |
 | `AZURE_SEARCH_KEY` | AI Search service, **Settings**, **Keys**, **Primary admin key** (use the admin key, a query key is read-only) |
-| `AZURE_SEARCH_INDEX` | A name you choose, for example `cvs-index`. It is created automatically |
+| `AZURE_SEARCH_INDEX` | A name prefix you choose, for example `cvs-index`. Each user gets `<prefix>-<user id>`, created at sign-up |
 | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource, **Keys and Endpoint**. Use only `https://<name>.openai.azure.com` |
 | `AZURE_OPENAI_API_KEY` | Same page, **KEY 1** |
 | `AZURE_OPENAI_API_VERSION` | Keep `2024-10-21` |
 | `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | The **deployment name** of your embedding model (not the model name) |
 | `AZURE_OPENAI_CHAT_DEPLOYMENT` | The **deployment name** of your chat model (not the model name) |
 
-`.env` holds secrets and is git-ignored. Never commit it.
+`DATABASE_URL` (Postgres) is already filled in for the Docker setup below. `.env` holds secrets and is git-ignored. Never commit it.
 
 ### 4. Run
 
 ```bash
+docker compose up -d      # Postgres for accounts and chats
 uv run streamlit run app.py
 ```
 
-The browser opens automatically. The search index is created (or checked) when the app starts, and the Blob container the first time you process CVs. The first CV also loads the Docling layout models, which are downloaded on first use, so it takes noticeably longer than the next ones.
+The browser opens automatically. Each user's search index and Blob container are created when they sign up (and checked each time they log in). The first CV also loads the Docling layout models, which are downloaded on first use, so it takes noticeably longer than the next ones.
 
 ---
 
@@ -220,7 +236,8 @@ The browser opens automatically. The search index is created (or checked) when t
    - **Query expansion** searches reworded versions of each question as well (finds more, answers start 1 to 2 seconds later, three searches per question),
    - **Cache final answers** reuses the answer to an identical question in an identical chat (off by default, because a cached answer can be out of date),
    - **Clear cache** forgets everything cached by hand.
-8. **Start over.** **New chat** clears the conversation. It does not delete any CVs.
+8. **Start over.** **New chat** starts a new conversation and keeps the old one in your chat list. It does not delete any CVs.
+9. **Browse candidates.** Switch to **Candidates** above the chat to see every CV as a card (see [Candidates view](#candidates-view)).
 
 Your CVs stay in Azure, so they are still there after you close the app. The sidebar lists them again the next time you open it.
 
@@ -231,12 +248,17 @@ Your CVs stay in Azure, so they are still there after you close the app. The sid
 ```
 chat-with-cv/
 ├── app.py                    # Streamlit entry point
-├── .env.example              # template for your Azure settings
+├── .env.example              # template for your Azure and Postgres settings
+├── docker-compose.yml        # Postgres for accounts and chats
 ├── .cache/                   # saved Docling output (created on first run, git-ignored)
 ├── pyproject.toml            # dependencies (managed by uv)
 ├── uv.lock                   # exact package versions
 └── cv_chat/
     ├── config.py             # reads .env and holds all settings
+    ├── db.py                 # Postgres connection and tables (users, sessions, chats)
+    ├── auth.py               # sign up, log in, sessions, change password, delete user
+    ├── history.py            # saved chats, always scoped to one user
+    ├── workspace.py          # one user's container and index names, passed to every Azure call
     ├── services/             # one small file per Azure service
     │   ├── blob_storage.py       # store and list CV files
     │   ├── search_index.py       # create the index, save chunks, hybrid + semantic search
@@ -255,7 +277,9 @@ chat-with-cv/
     │   ├── qa.py                 # question flow: route, expand, search or agent, stream answer, cache
     │   └── retrieval.py          # embed, hybrid search, rank fusion, spread over CVs, excerpt formatting
     └── ui/                   # Streamlit screens
-        ├── sidebar.py            # upload, process, list of CVs
+        ├── accounts.py           # login and sign-up screen, session cookie, account menu
+        ├── candidates.py         # the Candidates view
+        ├── sidebar.py            # chats, upload, process, list of CVs
         ├── chat.py               # conversation and sources
         ├── details.py            # the Details dropdown: route, timeline, searches, agent, excerpts
         ├── safe.py               # escapes CV text and strips images before anything is drawn
@@ -404,6 +428,8 @@ Most problems now show a message that says what to check. These are the ones you
 
 | What you see | What it means and what to do |
 |---|---|
+| `Could not reach Postgres` on the login screen | Postgres is not running. Start it with `docker compose up -d` and reload the page |
+| `Could not set up your storage, so the account was not created` | Azure refused to create the new user's container or search index (check the Azure values in `.env` and the index limit of your search tier). Nothing was created, so you can try again |
 | `Missing 'AZURE_...' in .env` | Lists every empty or missing value at once. Copy `.env.example` to `.env`, fill them in and restart the app |
 | `The index '...' was made by an older version` | The index settings changed (English text analyzer, filterable file names, explicit cosine metric, CV metadata fields, a scoring profile, searchable section headings) and Azure cannot change these in place. Delete the index in the Azure portal, or set a new `AZURE_SEARCH_INDEX` in `.env`, restart the app, then open **Manage a CV** and click **Update outdated CVs** to index the stored CVs again |
 | `Could not connect to Azure` at start-up | A value in `.env` is malformed, most often the storage connection string. Copy it again from the portal |
@@ -424,16 +450,22 @@ If the search service has no semantic ranker (Free tier, or it is switched off),
 
 ## Run the pipeline without the UI
 
-Handy for debugging. Put some CVs in a local `cvs/` folder (it is git-ignored) and run:
+Handy for debugging. Everything works on one user's data, so you need a user id:
 
 ```bash
-uv run python -c "from pathlib import Path; from cv_chat.rag.ingest import process_cvs; [print(r) for r in process_cvs([(p.name, p.read_bytes()) for p in Path('cvs').iterdir()])]"
+docker compose exec postgres psql -U cvchat -c "select id, email from users"
 ```
 
-Each CV prints its chunk count, whether it was skipped as unchanged, or the error that stopped it.
+Put some CVs in a local `cvs/` folder (it is git-ignored) and run (replace `<user id>`):
+
+```bash
+uv run python -c "from pathlib import Path; from cv_chat.workspace import Workspace; from cv_chat.rag import ingest; ws = Workspace('<user id>'); ingest.prepare(ws); [print(p.name, ingest.process_cv(ws, p.name, p.read_bytes())) for p in Path('cvs').iterdir()]"
+```
+
+Each CV prints its chunk count and whether it was skipped as unchanged, or the error that stopped it.
 
 To ask a question the same way, without the UI:
 
 ```bash
-uv run python -c "from cv_chat.rag import qa; a = qa.ask('Who knows Kubernetes?', []); print(''.join(a.stream)); print(a.route, a.trace.to_dict()['total_ms'], 'ms')"
+uv run python -c "from cv_chat.workspace import Workspace; from cv_chat.rag import qa; a = qa.ask(Workspace('<user id>'), 'Who knows Kubernetes?', []); print(''.join(a.stream)); print(a.route, a.trace.to_dict()['total_ms'], 'ms')"
 ```

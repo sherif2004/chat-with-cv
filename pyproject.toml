@@ -5,14 +5,11 @@ description = "Chat with CVs using Azure Blob Storage, Azure AI Search and Azure
 requires-python = ">=3.11"
 dependencies = [
     "argon2-cffi>=23.1.0",
-    "psycopg[binary,pool]>=3.2.0",
     "azure-search-documents>=12.0.0",
     "azure-storage-blob>=12.31.0",
     "docling>=2.0.0",
     "openai>=3.24.0",
+    "psycopg[binary,pool]>=3.2.0",
     "python-dotenv>=1.2.4",
     "streamlit>=1.65.0",
 ]
-
-[dependency-groups]
-dev = ["pytest>=8.0.0"]

@@ -65,6 +65,24 @@ def sign_up(email: str, password: str, on_created: Callable[[User], None] | None
     return user
 
 
+def change_password(user_id: str, current: str, new: str, keep_token: str | None = None) -> None:
+    """Set a new password after checking the current one. Every other session of the user is ended; keep_token stays."""
+    if len(new) < MIN_PASSWORD:
+        raise AuthError(f"The new password needs at least {MIN_PASSWORD} characters.")
+    with db.pool().connection() as conn:
+        row = conn.execute("SELECT password_hash FROM users WHERE id = %s", (user_id,)).fetchone()
+        try:
+            _hasher.verify(row[0] if row else _DUMMY_HASH, current)
+        except VerificationError:
+            row = None
+        if row is None:
+            raise AuthError("The current password is wrong.")
+        conn.execute("UPDATE users SET password_hash = %s WHERE id = %s", (_hasher.hash(new), user_id))
+        conn.execute(
+            "DELETE FROM sessions WHERE user_id = %s AND token_hash <> %s", (user_id, _digest(keep_token) if keep_token else "")
+        )
+
+
 def delete_user(user_id: str) -> None:
     """Remove an account and its sessions. The caller removes the user's Azure data."""
     with db.pool().connection() as conn:

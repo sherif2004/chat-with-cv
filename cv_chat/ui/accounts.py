@@ -86,12 +86,54 @@ def _login_screen() -> str | None:
     return None
 
 
-def logout_button() -> None:
-    st.sidebar.caption(st.session_state["user"].email)
-    if st.sidebar.button("Log out", icon=":material/logout:"):
-        auth.log_out(st.session_state.get("token"))
-        _write_cookie("", 0)
-        for key in list(st.session_state):
-            del st.session_state[key]
-        st.info("You are logged out. Reload the page to log in again.", icon=":material/logout:")
-        st.stop()  # no rerun: the cookie script must stay on the page until the browser has run it
+def account_menu(user: auth.User) -> None:
+    """The account menu at the top of the sidebar: log out, change password, delete the account."""
+    with st.sidebar, st.popover(user.email, icon=":material/account_circle:", width="stretch"):
+        if st.button("Log out", icon=":material/logout:", width="stretch"):
+            auth.log_out(st.session_state.get("token"))
+            _end_session("You are logged out. Reload the page to log in again.")
+        st.divider()
+        st.markdown("**Change password**")
+        with st.form("change_password", clear_on_submit=True):
+            current = st.text_input("Current password", type="password")
+            new = st.text_input(f"New password (at least {auth.MIN_PASSWORD} characters)", type="password")
+            if st.form_submit_button("Change password"):
+                try:
+                    auth.change_password(user.id, current, new, keep_token=st.session_state.get("token"))
+                    st.toast("Password changed. You were logged out on your other devices.", icon=":material/task_alt:")
+                except auth.AuthError as error:
+                    st.error(str(error))
+        st.divider()
+        st.markdown("**Delete my account**")
+        st.caption("This deletes your CVs, your search index, your chats and your account. It cannot be undone.")
+        confirm = st.text_input("Type your email to confirm", key="delete_confirm")
+        if st.button("Delete my account", icon=":material/delete_forever:", type="primary", width="stretch",
+                     disabled=confirm.strip().lower() != user.email):
+            _delete_account(user)
+
+
+def _delete_account(user: auth.User) -> None:
+    """Azure data first: if that fails nothing else is removed, so the user can try again."""
+    from cv_chat.rag import ingest, jobs  # imported here: the account menu must work even when the Azure settings are wrong
+    from cv_chat.workspace import Workspace
+
+    ws = Workspace(user.id)
+    if jobs.queue_for(ws).active():
+        st.error("CVs are still being processed. Wait until they finish, then delete your account.")
+        return
+    try:
+        ingest.destroy(ws)
+    except Exception as error:
+        st.error(f"Could not delete your CVs and search index in Azure, so your account was not deleted: {str(error).splitlines()[0][:200]}")
+        return
+    auth.delete_user(user.id)  # also removes the sessions and the saved chats
+    _end_session("Your account and all your data were deleted.")
+
+
+def _end_session(message: str) -> None:
+    """Forget the login in this browser. No rerun: the cookie script must stay on the page until the browser has run it."""
+    _write_cookie("", 0)
+    for key in list(st.session_state):
+        del st.session_state[key]
+    st.info(message, icon=":material/logout:")
+    st.stop()
