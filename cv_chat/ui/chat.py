@@ -3,7 +3,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from cv_chat import config
+from cv_chat import config, history
 from cv_chat.rag import qa
 from cv_chat.services import blob_storage
 from cv_chat.ui import details, safe
@@ -92,10 +92,24 @@ def _answer(ws: Workspace, question: str) -> None:
         record = trace.to_dict()  # complete now that the answer has been written
         details.render(record, sources)
         _sources(ws, sources)
-    st.session_state.messages += [
+    exchange = [
         {"role": "user", "content": question},
         {"role": "assistant", "content": answer, "sources": sources, "route": route, "trace": record},
     ]
+    st.session_state.messages += exchange
+    if _save(ws, question, exchange):
+        st.rerun()  # the sidebar was drawn before this answer: redraw it so the chat list shows (and reorders) this chat
+
+
+def _save(ws: Workspace, question: str, exchange: list[dict]) -> bool:
+    """Keep the chat in Postgres. A failure here must not lose the answer the user is reading. True if it was saved."""
+    try:
+        if not st.session_state.get("conversation_id"):
+            st.session_state.conversation_id = history.create_conversation(ws.user_id, question)
+        return history.add_messages(ws.user_id, st.session_state.conversation_id, exchange)
+    except Exception as error:
+        st.warning(f"This answer could not be saved to your chat history: {str(error).splitlines()[0][:150]}", icon=":material/warning:")
+        return False
 
 
 def _route_note(route: str | None) -> None:

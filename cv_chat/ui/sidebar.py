@@ -1,7 +1,7 @@
 """Sidebar: the CV knowledge base. Upload CVs, watch them being processed in parallel, list, re-index and delete them."""
 import streamlit as st
 
-from cv_chat import config
+from cv_chat import config, history
 from cv_chat.rag import ingest, jobs
 from cv_chat.rag.cache import cache_for
 from cv_chat.ui.safe import esc
@@ -13,6 +13,7 @@ def render(ws: Workspace) -> list[str]:
     if notice := st.session_state.pop("notice", None):  # result of a Manage action, which ran before this rerun
         st.toast(esc(notice[0]), icon=notice[1])
     with st.sidebar:
+        _chats(ws)
         st.markdown("### :material/folder_open: Knowledge base")
         cvs = _list_cvs(ws)
         st.caption(f"Upload at least {config.MIN_CVS} CVs")
@@ -48,8 +49,6 @@ def render(ws: Workspace) -> list[str]:
             "Clear cache", icon=":material/mop:", width="stretch", on_click=_clear_cache, args=(ws,),
             help="Forget cached router results, searches and answers. This also happens whenever a CV is processed or deleted.",
         )
-        if st.button("New chat", icon=":material/add_comment:", width="stretch"):
-            st.session_state.messages = []
     return cvs
 
 
@@ -182,3 +181,49 @@ def _delete(ws: Workspace, name: str) -> None:
         st.session_state.notice = (f"Deleted {name}", ":material/task_alt:")
     except Exception as error:
         st.session_state.notice = (f"Could not delete {name}: {str(error).splitlines()[0][:150]}", ":material/error:")
+
+
+def _chats(ws: Workspace) -> None:
+    """New chat and the list of saved chats, newest first. Each one can be opened, renamed or deleted."""
+    st.button("New chat", icon=":material/add_comment:", type="primary", width="stretch", on_click=_new_chat)
+    try:
+        chats = history.list_conversations(ws.user_id)
+    except Exception as error:
+        st.caption(f"Could not load your chats: {esc(str(error).splitlines()[0][:100])}")
+        return
+    current = st.session_state.get("conversation_id")
+    for chat in chats:
+        title_column, menu_column = st.columns([5, 1], vertical_alignment="center")
+        title_column.button(
+            chat.title, key=f"open_{chat.id}", width="stretch", on_click=_open_chat, args=(ws, chat.id),
+            type="secondary", icon=":material/chat_bubble:" if chat.id == current else None,
+        )
+        with menu_column.popover("", icon=":material/more_vert:"):
+            st.text_input("Name", value=chat.title, key=f"name_{chat.id}", max_chars=history.TITLE_LENGTH)
+            st.button("Rename", key=f"rename_{chat.id}", icon=":material/edit:", on_click=_rename_chat, args=(ws, chat.id, f"name_{chat.id}"))
+            st.button("Delete", key=f"delete_{chat.id}", icon=":material/delete:", on_click=_delete_chat, args=(ws, chat.id))
+
+
+def _new_chat() -> None:
+    st.session_state.messages = []
+    st.session_state.conversation_id = None
+
+
+def _open_chat(ws: Workspace, conversation_id: str) -> None:
+    messages = history.load_messages(ws.user_id, conversation_id)
+    if messages is None:  # deleted elsewhere, or not this user's
+        st.session_state.notice = ("That chat no longer exists", ":material/info:")
+        return
+    st.session_state.messages = messages
+    st.session_state.conversation_id = conversation_id
+
+
+def _rename_chat(ws: Workspace, conversation_id: str, name_key: str) -> None:
+    if not history.rename(ws.user_id, conversation_id, st.session_state.get(name_key, "")):
+        st.session_state.notice = ("Could not rename the chat", ":material/error:")
+
+
+def _delete_chat(ws: Workspace, conversation_id: str) -> None:
+    history.delete(ws.user_id, conversation_id)
+    if st.session_state.get("conversation_id") == conversation_id:
+        _new_chat()

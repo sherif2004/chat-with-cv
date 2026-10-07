@@ -39,7 +39,7 @@ def clean_db():
     assert db.DATABASE_URL == TEST_URL and db.DATABASE_URL.endswith("_test")
     db.init_schema()
     with db.pool().connection() as conn:
-        conn.execute("TRUNCATE sessions, users CASCADE")
+        conn.execute("TRUNCATE messages, conversations, sessions, users CASCADE")
     yield
 
 

@@ -19,6 +19,25 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at timestamptz NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id);
+CREATE TABLE IF NOT EXISTS conversations (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS conversations_user_idx ON conversations(user_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS messages (
+    id bigserial PRIMARY KEY,
+    conversation_id uuid NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role text NOT NULL CHECK (role IN ('user', 'assistant')),
+    content text NOT NULL,
+    sources jsonb,
+    route text,
+    trace jsonb,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages(conversation_id, id);
 """
 
 _pool: ConnectionPool | None = None

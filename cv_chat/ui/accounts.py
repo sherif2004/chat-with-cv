@@ -6,7 +6,6 @@ writes the cookie. It is therefore not HttpOnly; it holds a random token whose h
 import json
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 from cv_chat import auth, db
 
@@ -36,7 +35,7 @@ def _provision(user: auth.User) -> None:
 
 def _write_cookie(value: str, max_age: int) -> None:
     script = f"window.parent.document.cookie = {json.dumps(f'{COOKIE}={value}; path=/; max-age={max_age}; SameSite=Lax')};"
-    components.html(f"<script>{script}</script>", height=0)
+    st.iframe(f"<script>{script}</script>", height=1)  # a fixed string built here: no user text goes into it
 
 
 def current_user() -> auth.User:

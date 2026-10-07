@@ -28,3 +28,13 @@ Goal: several people use the app, each with their own CVs, search index and chat
 
 ## Testing
 pytest against the Docker Postgres for the auth module (sign-up, duplicate email, login, wrong password, session expiry, logout, user cap).
+
+## UI and history (approved 2026-10-07)
+Built in this order; each step is its own commit(s).
+
+- **A. Chat history + conversation list.** Tables `conversations(id, user_id, title, created_at, updated_at)` and `messages(id, conversation_id, role, content, sources jsonb, route, trace jsonb, created_at)`, both removed with the user. `cv_chat/history.py` takes the user id in every function and puts it in the SQL, so a conversation id alone never opens anyone's chat. Sidebar: New chat, a list of past chats (newest first, 30), rename and delete per chat; title = first question cut to 60 characters. The model still gets only the last `HISTORY_MESSAGES` messages.
+- **B. Account area.** Log out, change password (current password required; other sessions are logged out), delete account (type the email; Azure data is deleted first and a failure leaves the database untouched).
+- **C. Candidates view.** A Chat | Candidates switch; one card per CV from the indexed metadata, with filter, minimum years, sort, Open CV (signed link) and Chat with this CV. Only the selected view is drawn. Limit: `list_profiles` reads the first 1000 chunks.
+- **D. Visual polish.** Centered login card, theme in `.streamlit/config.toml` and `styles.css` for light and dark, better empty states.
+
+Checking the screens: a throwaway launcher outside the repo fakes Azure with in-memory data. It is not committed and proves nothing about real Azure.
