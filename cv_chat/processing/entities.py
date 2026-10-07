@@ -26,16 +26,32 @@ EMPTY = {"candidate_name": "", "job_title": "", "years_experience": None, "email
 HEADER_LINES = 12  # the top of the first page, where the name, title and contact line are
 NAME_LINES = 6  # the name is within the first few lines
 HEADER_CHARS = 800  # how much of the top is read by the NER model
+FULL_TEXT_CHARS = 50_000  # the patterns never scan more than this much of a CV, however long it is
+PAGE_NER_CHARS = 6000  # how much of a page is read by the NER model when the name is not at the top
 SKIPPED_FOR_YEARS = {"education", "certifications", "languages", "contact"}  # dates in these are not jobs
 
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-_PHONE = re.compile(r"(?<![\w/])(\+?\(?\d[\d\s().-]{6,}\d)(?![\w/])")
+_PHONE = re.compile(r"(?<![\w/])(\+?\(?\d[\d\s().-]{6,22}\d)(?![\w/])")
 _YEAR_RANGE = re.compile(r"^\(?(?:19|20)\d{2}\)?\s*[-–—]\s*\(?(?:19|20)\d{2}\)?$")
 _NOT_A_NAME = {
     "curriculum vitae", "resume", "résumé", "cv", "profile", "summary", "contact", "personal information",
     "personal details", "objective", "about me", "career objective", "professional summary",
 }
-_NAME = re.compile(r"^[^\W\d_][\w'’.-]*(?: [^\W\d_][\w'’.-]*){1,3}$")  # two to four words, no digits
+_PARTICLES = {"de", "del", "della", "di", "da", "dos", "du", "van", "von", "der", "den", "ter", "ten", "bin", "bint", "ibn", "abu", "al", "el", "la", "le", "ben", "mac", "st"}
+_NAME_WORD = re.compile(r"[^\W\d_][^\W\d_]*(?:['’-][^\W\d_]+)*")  # letters, with an inner apostrophe or hyphen: O'Brien, Anne-Marie
+_NOT_NAME_WORDS = {  # words that make a line something other than a person's name
+    "computer", "science", "sciences", "engineering", "technology", "technologies", "university", "college", "school", "institute",
+    "academy", "faculty", "bachelor", "bachelors", "master", "masters", "degree", "diploma", "certificate", "certification",
+    "certifications", "skills", "skill", "experience", "education", "summary", "profile", "objective", "projects", "project",
+    "languages", "language", "courses", "course", "training", "internship", "management", "development", "software", "hardware",
+    "data", "systems", "system", "network", "networks", "web", "mobile", "design", "analysis", "analytics", "quality", "assurance",
+    "testing", "business", "administration", "information", "security", "cloud", "artificial", "intelligence", "machine",
+    "learning", "english", "arabic", "french", "german", "spanish", "native", "fluent", "intermediate", "beginner", "microsoft",
+    "google", "amazon", "linkedin", "github", "email", "phone", "address", "reference", "references", "available", "request",
+    "personal", "details", "information", "contact", "professional", "technical", "work", "history", "achievements", "awards",
+    "interests", "hobbies", "volunteer", "activities", "publications", "gpa", "grade", "graduate", "graduated", "present",
+    "company", "limited", "ltd", "inc", "corp", "department", "digital", "global", "solutions", "services", "group",
+}
 _TITLE_WORDS = re.compile(
     r"\b(?:engineer|developer|programmer|architect|manager|director|analyst|scientist|consultant|designer|administrator|"
     r"specialist|lead|head|officer|coordinator|technician|researcher|accountant|auditor|teacher|lecturer|professor|"
@@ -52,6 +68,14 @@ _RANGE = re.compile(rf"({_DATE})\s*(?:-|–|—|to|until)\s*({_DATE}|present|cur
 _STATED = re.compile(r"(\d{1,2})\s*\+?\s*(?:years?|yrs?)\s+(?:of\s+)?(?:professional\s+|work\s+|relevant\s+|industry\s+)?experience", re.I)
 _MONTH_NUMBER = {name: number for number, name in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
+
+_NOT_A_PERSON_LOCAL = {
+    "info", "contact", "hr", "admin", "mail", "email", "cv", "resume", "jobs", "job", "career", "careers", "hello", "office",
+    "support", "sales", "team", "me", "my", "the", "recruitment", "apply", "enquiries", "noreply", "no", "reply",
+}
+_NOT_A_PERSON_FILE = re.compile(
+    r"\b(?:cv|resume|résumé|curriculum|vitae|copy|final|new|updated|latest|profile|candidate|application|draft|scan|scanned|doc|document)\b", re.I
+)
 
 _lock = threading.Lock()  # one NER call at a time: the ingest threads share the model
 
@@ -91,10 +115,26 @@ def _clean(value, limit: int) -> str:
     return " ".join(str(value or "").replace("<", " ").replace(">", " ").split())[:limit]
 
 
+def _looks_like_name(text: str) -> bool:
+    """Two to four words, each a capitalised word, an initial ("A." or "A") or a name particle ("de", "bin"): nothing else.
+    "B.Sc. in Computer Engineering" and "Machine Learning" are not names, "Ada de Lovelace" and "J. R. Smith" are."""
+    words = text.split()
+    if not 2 <= len(words) <= 4:
+        return False
+    real = 0
+    for word in words:
+        if re.fullmatch(r"[^\W\d_]\.?", word) or word.lower() in _PARTICLES:
+            continue
+        if not (_NAME_WORD.fullmatch(word) and word[0].isupper()):
+            return False
+        real += 1
+    return real >= 1 and not {word.lower().strip(".") for word in words} & _NOT_NAME_WORDS
+
+
 def _is_name(text: str) -> bool:
     text = text.strip()
     return (
-        bool(_NAME.match(text)) and text.lower() not in _NOT_A_NAME and not _TITLE_WORDS.search(text) and "@" not in text
+        _looks_like_name(text) and text.lower() not in _NOT_A_NAME and not _TITLE_WORDS.search(text) and "@" not in text
         and section_type(text) == "other"  # "Work Experience" and "Technical Skills" are headings, not people
     )
 
@@ -117,6 +157,65 @@ def _name(lines: list[str], entities: list[tuple[str, str, int, int]], offsets: 
         if _is_name(line):
             return _tidy_name(line), index
     return "", -1
+
+
+def _name_from_email(email: str) -> tuple[str, str]:
+    """(a name read from the part before the @, that part reduced to letters). "ada.lovelace2024@x.com" gives
+    ("Ada Lovelace", "adalovelace"). The name is "" unless the address is made of two or three plain words."""
+    local = email.split("@")[0].lower()
+    letters = re.sub(r"[^a-z]", "", local)
+    parts = [part for part in re.split(r"[^a-z]+", local) if part]
+    if 2 <= len(parts) <= 3 and all(len(part) >= 2 for part in parts) and not set(parts) & _NOT_A_PERSON_LOCAL:
+        return " ".join(part.capitalize() for part in parts), letters
+    return "", letters
+
+
+def _name_from_file(file_name: str) -> tuple[str, str]:
+    """(a name read from the file name, the file name reduced to letters). "Ada_Lovelace_CV.pdf" gives ("Ada Lovelace", ...)."""
+    stem = re.sub(r"\.[A-Za-z0-9]{2,5}$", "", file_name.strip())
+    letters = re.sub(r"[^a-z]", "", stem.lower())
+    spaced = re.sub(r"[\d_.()+\-]+", " ", re.sub(r"(?<=[a-z])(?=[A-Z])", " ", stem))  # "Ada_Lovelace-CV2024" -> "Ada Lovelace CV"
+    words = _NOT_A_PERSON_FILE.sub(" ", spaced).split()  # then leave out words such as CV and resume
+    if 2 <= len(words) <= 4 and all(re.fullmatch(r"[^\W\d_][\w'’]+", word) for word in words):
+        return " ".join(word.capitalize() for word in words), letters
+    return "", letters
+
+
+def _agrees(name: str, *evidence: str) -> bool:
+    """True if the name matches the email address or file name it is checked against: one word of four letters or more
+    appears in it, or two shorter ones do. This is what keeps a name-shaped line such as "Machine Learning" from being taken
+    for a person."""
+    words = [word for word in re.findall(r"[a-z]+", name.lower()) if len(word) >= 3]
+    hits = [word for word in words if any(word in text for text in evidence if text)]
+    return any(len(word) >= 4 for word in hits) or len(hits) >= 2
+
+
+def _name_elsewhere(pages: list[tuple[int, str]], email_name: str, email_letters: str, file_name_name: str, file_letters: str) -> str:
+    """The name when it is not in the first lines (a CV that opens with a long summary, or whose layout put the name later).
+    Candidates are people spaCy finds on the first two pages and lines that are just a name. One is taken only when the email
+    address or the file name backs it up. Failing that, a name read from the email address or the file name is used, and
+    last of all a line that is just a name and that spaCy also calls a person."""
+    people: list[str] = []
+    name_lines: list[str] = []
+    for _, text in pages[:2]:
+        text = text[:PAGE_NER_CHARS]
+        for entity, label, _, _ in _entities(text):
+            candidate = " ".join(entity.split())
+            if label == "PERSON" and 2 <= len(candidate.split()) <= 4 and _is_name(candidate):
+                people.append(candidate)
+        name_lines += [line for line in (" ".join(raw.split()) for raw in text.splitlines()) if _is_name(line)]
+    candidates = list(dict.fromkeys(people + name_lines))
+    for candidate in candidates:
+        if _agrees(candidate, email_letters, file_letters):
+            return _tidy_name(candidate)
+    if email_name:
+        return email_name
+    if file_name_name:
+        return file_name_name
+    for line in name_lines:
+        if line in people:
+            return _tidy_name(line)
+    return ""
 
 
 def _phone(text: str) -> str:
@@ -204,16 +303,16 @@ def _years(text: str, today: date) -> float | None:
     return years if years is not None and 0 < years <= config.MAX_YEARS else None
 
 
-def extract(pages: list[tuple[int, str]], chunks: list[Chunk], today: date | None = None) -> dict:
-    """The candidate's details from a CV's pages and chunks. Never raises."""
+def extract(pages: list[tuple[int, str]], chunks: list[Chunk], today: date | None = None, file_name: str = "") -> dict:
+    """The candidate's details from a CV's pages and chunks (and its file name, which can confirm the name). Never raises."""
     try:
-        return _extract(pages, chunks, today or date.today())
+        return _extract(pages, chunks, today or date.today(), file_name)
     except Exception as error:
         log.warning("could not read CV details: %s", str(error).splitlines()[0] if str(error) else type(error).__name__)
         return dict(EMPTY)
 
 
-def _extract(pages: list[tuple[int, str]], chunks: list[Chunk], today: date) -> dict:
+def _extract(pages: list[tuple[int, str]], chunks: list[Chunk], today: date, file_name: str = "") -> dict:
     first_page = pages[0][1] if pages else ""
     lines = [" ".join(line.split()) for line in first_page.splitlines() if line.strip()][:HEADER_LINES]
     header, offsets = "", []
@@ -222,15 +321,21 @@ def _extract(pages: list[tuple[int, str]], chunks: list[Chunk], today: date) -> 
         header += line + "\n"
     header = header[:HEADER_CHARS]
     entities = _entities(header)
-    full_text = "\n".join(text for _, text in pages)
+    full_text = "\n".join(text for _, text in pages)[:FULL_TEXT_CHARS]
+    email = _EMAIL.search(header) or _EMAIL.search(full_text)
 
+    email_name, email_letters = _name_from_email(email.group()) if email else ("", "")
+    file_name_name, file_letters = _name_from_file(file_name)
     name, name_index = _name(lines, entities, offsets)
+    if name and name_index >= 2 and (email_name or file_name_name) and not _agrees(name, email_letters, file_letters):
+        name, name_index = email_name or file_name_name, -1  # a name a few lines down that the email or file name contradicts is probably not the owner
+    if not name:  # the name is not in the first lines: look further, with the email address and file name as a check
+        name = _name_elsewhere(pages, email_name, email_letters, file_name_name, file_letters)
     experience_chunks = [c for c in chunks if section_type(c.section) == "experience"]
     dated_chunks = experience_chunks or [c for c in chunks if section_type(c.section) not in SKIPPED_FOR_YEARS]
     experience_lines = [line for c in experience_chunks for line in c.text.splitlines()[1:]]  # [1:] skips the heading
     dated_text = "\n".join(c.text for c in dated_chunks) if chunks else full_text
 
-    email = _EMAIL.search(header) or _EMAIL.search(full_text)
     return {
         "candidate_name": name,
         "job_title": _job_title(lines, name_index, experience_lines),
