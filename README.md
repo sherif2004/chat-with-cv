@@ -88,7 +88,7 @@ flowchart TD
     R -- "chat (hi, thanks)" --> C["Reply without searching"]
     R -- simple --> X["Optional: reworded queries"]
     X --> S[("Azure AI Search<br/>hybrid search + semantic ranker<br/>name, title and section boosts")]
-    S --> T["Max 2 chunks per CV<br/>top 10 overall"]
+    S --> T["Top-p: keep the relevant CVs<br/>and their relevant excerpts"]
     T --> M["Azure OpenAI chat model<br/>streams the answer in your language"]
     R -- complex --> G["Agent: list_cvs, search_cvs, get_cv<br/>max 5 rounds, 30 s"]
     G --> M
@@ -105,7 +105,7 @@ flowchart TD
 
    A scoring profile makes a keyword match in the candidate name or job title count more than the same words in the body text, and favours the *experience* and *skills* sections. When sections were picked, only those sections are searched. If fewer than 3 chunks match (some CVs use unusual headings), it searches everything instead.
 5. **Semantic re-ranking.** Azure's semantic ranker reads the question and each of the top 30 candidates and re-orders them by how well they answer it. It also returns the most relevant passage of each chunk, which the Sources list shows.
-6. **Spread over CVs.** Each CV may contribute at most 2 chunks, and the best 10 go on, so a broad question such as "who knows Python?" reaches many CVs instead of one or two.
+6. **Keep what is relevant (top-p).** The search returns up to 50 chunks with the ranker's relevance score. They are grouped by CV, and a CV counts as relevant as its best chunk. Instead of a fixed number, the best CVs are kept until they hold 80% of the relevance (`TOP_P`), then the same is done for the excerpts inside each kept CV. Each score's share is its softmax, so a clear winner takes most of it and a close field shares it. A question about one person therefore sends one or two CVs, and a broad question such as "who knows Python?" sends many. `MAX_CVS` and `MAX_CHUNKS_PER_CV` only cap the extreme case where every score is the same. A CV's excerpts stay together, in reading order, with the best CV first.
 7. **Ask the chat model.** It receives the excerpts (each labelled with CV, section and page, and the first one of every CV with a line about the candidate: name, title, years, contact), the question and the last few chat messages. It is told to answer only from the excerpts, to cite `[file name, p.N]`, to answer in the language of the question, and to say so when the answer is not there. The answer streams into the chat as it is written.
 8. **Complex questions go to the agent** instead of steps 2 to 7. It can list all CVs with their name, title and years of experience, search (optionally limited to some CVs or filtered by years and job title) and read a whole CV. Its steps appear in the status box while it works.
 9. **Show the sources and the details:** the CVs the answer came from, and a **Details** dropdown with the route, timeline, searches and excerpts used.
@@ -275,7 +275,7 @@ chat-with-cv/
     │   ├── ingest.py             # upload flow: skip check, extract, chunk, embed, save; delete
     │   ├── jobs.py               # background queue: runs CVs in parallel and tracks each file's state
     │   ├── qa.py                 # question flow: route, expand, search or agent, stream answer, cache
-    │   └── retrieval.py          # embed, hybrid search, rank fusion, spread over CVs, excerpt formatting
+    │   └── retrieval.py          # embed, hybrid search, rank fusion, top-p selection, excerpt formatting
     └── ui/                   # Streamlit screens
         ├── accounts.py           # login and sign-up screen, session cookie, account menu
         ├── candidates.py         # the Candidates view
@@ -318,8 +318,11 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 | `EMBED_BATCH` | `16` | Chunks per embedding request |
 | `EMBED_CONCURRENCY` | `2` | Embedding requests in flight at once, across all CVs |
 | `EXTRACT_CACHE_DIR` | `.cache/extracted` | Where Docling output is saved |
-| `RETRIEVE_K` | `30` | Candidates fetched and re-ranked per question |
-| `MAX_CHUNKS_PER_CV` | `2` | Most chunks one CV can contribute to an answer |
+| `RETRIEVE_K` | `50` | Chunks fetched and re-ranked per search, then grouped by candidate (50 is the semantic ranker's limit) |
+| `TOP_P` | `0.8` | Share of the relevance that the kept CVs, and the kept excerpts of each, must cover. Higher sends more, lower sends less |
+| `TOP_P_TEMPERATURE` | `0.15` | How sharply a higher score is favoured when shares are worked out. Lower lets a clear winner take more |
+| `MAX_CVS` | `10` | Most candidates sent to the chat model, however flat the scores are |
+| `MAX_CHUNKS_PER_CV` | `4` | Most excerpts of one candidate sent to the chat model |
 | `EXPANDED_QUERIES` | `2` | Alternative queries searched when **Query expansion** is on |
 | `RRF_K` | `60` | Reciprocal rank fusion constant used to merge the searches |
 | `CACHE_SIZE` | `256` | Entries kept per kind of cached result (router, search, answer) |
@@ -329,7 +332,6 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 | `AGENT_MAX_SECONDS` | `30` | Time budget for those rounds, then it answers with what it found |
 | `AGENT_SEARCH_K` | `20` | Most excerpts one agent search hands to the model (one per CV by default, so a search reaches up to 20 CVs) |
 | `AGENT_CV_CHARS` | `12000` | Most characters of one CV the `get_cv` tool hands to the model |
-| `TOP_K` | `10` | Chunks sent to the chat model for each question |
 | `MIN_FILTERED_RESULTS` | `3` | Fewer section-filtered hits than this and the search runs again on all sections |
 | `HISTORY_MESSAGES` | `6` | Recent chat messages used for the router and sent with each question |
 | `EMBED_CACHE_SIZE` | `256` | Query embeddings kept in memory |

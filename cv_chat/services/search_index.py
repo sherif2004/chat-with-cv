@@ -266,7 +266,9 @@ def hybrid_search(
     found = []
     for result in results:
         captions = result.get("@search.captions") or []
+        reranker = result.get("@search.reranker_score")
         found.append({
+            "score": reranker if reranker is not None else result.get("@search.score"),  # how relevant Azure found the chunk
             "file_name": result["file_name"], "file_url": result.get("file_url") or "", "section": result.get("section") or "", "page": result.get("page"),
             "content": result["content"], "caption": captions[0].text if captions and captions[0].text else "",
             **{name: result.get(name) for name in META_FIELDS},

@@ -1,4 +1,5 @@
 """Finding CV chunks for a question: embed, hybrid search, merge several searches, spread over CVs."""
+import math
 import re
 import time
 from collections import Counter
@@ -57,26 +58,71 @@ def fuse(result_lists: list[list[dict]]) -> list[dict]:
         for rank, result in enumerate(results, start=1):
             key = (result["file_name"], result["section"], result["page"], result["content"])
             scores[key] += 1 / (config.RRF_K + rank)
-            chunks.setdefault(key, result)
+            if key not in chunks or (result.get("score") or 0) > (chunks[key].get("score") or 0):
+                chunks[key] = result  # keep the copy with the highest relevance score
     return [chunks[key] for key, _ in scores.most_common()]
 
 
 def retrieve(
-    ws: Workspace, queries: list[str], sections: list[str], trace: Trace | None = None, file_ids: list[str] | None = None
+    ws: Workspace, queries: list[str], sections: list[str], trace: Trace | None = None, file_ids: list[str] | None = None,
 ) -> list[dict]:
-    """Search every query (the first is the main one), merge the lists and keep the best chunks. file_ids limits it to those CVs."""
+    """Search every query (the first is the main one), merge the lists, then keep the relevant candidates and their relevant
+    excerpts (see rank_cvs). file_ids limits it to those CVs."""
     if len(queries) == 1:
         results = search(ws, queries[0], sections, file_ids, trace=trace)
     else:
         with ThreadPoolExecutor(max_workers=len(queries)) as pool:
             results = fuse(list(pool.map(lambda query: search(ws, query, sections, file_ids, trace=trace), queries)))
-    return spread_over_cvs(results)
+    return rank_cvs(results)
 
 
-def spread_over_cvs(
-    results: list[dict], per_cv: int = config.MAX_CHUNKS_PER_CV, limit: int = config.TOP_K
+def _weights(results: list[dict]) -> list[float]:
+    """How relevant each result is, from 0 to 1 (its score divided by the best score). Without scores (the search service
+    returned none) the rank stands in for them, which makes every result look about equally relevant."""
+    scores = [result.get("score") for result in results]
+    if not results or any(score is None or score <= 0 for score in scores):
+        scores = [1 / (config.RRF_K + rank) for rank in range(1, len(results) + 1)]
+    best = max(scores)
+    return [score / best for score in scores]
+
+
+def _nucleus(weights: list[float], top_p: float, limit: int) -> int:
+    """How many of the weights (best first) to keep: the fewest that hold `top_p` of the total share, but at least one
+    and at most `limit`. A share is the weight's softmax, so a clear winner takes most of it and a close field shares it."""
+    exps = [math.exp(weight / config.TOP_P_TEMPERATURE) for weight in weights]
+    total = sum(exps)
+    covered = 0.0
+    for count, value in enumerate(exps, start=1):
+        covered += value / total
+        if covered >= top_p or count >= limit:
+            return count
+    return len(weights)
+
+
+def rank_cvs(
+    results: list[dict], top_p: float = config.TOP_P, max_cvs: int = config.MAX_CVS, max_chunks: int = config.MAX_CHUNKS_PER_CV
 ) -> list[dict]:
-    """Keep the ranking but allow each CV only a few chunks, so broad questions reach many CVs."""
+    """Keep what is relevant instead of a fixed number. Top-p is applied twice:
+    - candidates: a CV is as relevant as its best chunk; the best CVs are kept until they hold `top_p` of the relevance
+      (at most `max_cvs`), so a question about one person keeps one or two and a broad question keeps many;
+    - excerpts: for each kept CV, its best chunks are kept the same way (at most `max_chunks`).
+    The result lists the CVs best first, each with its chunks in reading order, so the model sees a candidate's excerpts together."""
+    if not results:
+        return []
+    weights = _weights(results)
+    groups: dict[str, list[tuple[float, dict]]] = {}
+    for weight, chunk in zip(weights, results):
+        groups.setdefault(chunk["file_name"], []).append((weight, chunk))
+    cvs = sorted(((max(w for w, _ in group), sorted(group, key=lambda item: -item[0])) for group in groups.values()), key=lambda cv: -cv[0])
+    picked = []
+    for _, group in cvs[: _nucleus([best for best, _ in cvs], top_p, max_cvs)]:
+        kept = group[: _nucleus([weight for weight, _ in group], top_p, max_chunks)]
+        picked += [chunk for _, chunk in sorted(kept, key=lambda item: (item[1].get("page") is None, item[1].get("page") or 0))]
+    return picked
+
+
+def spread_over_cvs(results: list[dict], per_cv: int, limit: int) -> list[dict]:
+    """Keep the ranking but allow each CV only a few chunks, so a search reaches many CVs (used by the agent)."""
     taken: Counter[str] = Counter()
     picked = []
     for result in results:

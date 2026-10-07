@@ -45,9 +45,11 @@ CHUNK_OVERLAP = CHUNK_SIZE // 5  # 20% overlap, used only when a long section is
 DOCLING_DEVICE = "cpu"  # "cuda" if a GPU is available
 MIN_CVS = 8  # CVs needed in the knowledge base before processing and chatting are enabled
 MAX_WORKERS = 4  # CVs processed in parallel
-TOP_K = 10  # chunks sent to the chat model per question
-RETRIEVE_K = 30  # candidates fetched and reranked before the per-CV cap is applied
-MAX_CHUNKS_PER_CV = 2  # so one CV cannot fill all TOP_K slots of a broad question
+RETRIEVE_K = 50  # chunks fetched and re-ranked per search, then grouped by candidate (50 is the semantic ranker's limit)
+TOP_P = 0.8  # keep the most relevant candidates, and the most relevant excerpts of each, until they hold this share of the relevance
+TOP_P_TEMPERATURE = 0.15  # how sharply a higher relevance score is favoured when shares are worked out: lower = a clear winner takes more
+MAX_CVS = 10  # most candidates sent to the chat model, however flat the scores are
+MAX_CHUNKS_PER_CV = 4  # most excerpts of one candidate sent to the chat model
 EXPANDED_QUERIES = 2  # alternative queries searched next to the main one when query expansion is on
 RRF_K = 60  # reciprocal rank fusion constant: higher flattens the difference between ranks
 MIN_FILTERED_RESULTS = 3  # fewer section-filtered hits than this -> search again without the filter
