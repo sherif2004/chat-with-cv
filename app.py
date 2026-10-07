@@ -3,7 +3,7 @@ import streamlit as st
 
 st.set_page_config(page_title="CV Chat", page_icon=":material/description:", layout="wide")
 
-from cv_chat.ui import accounts, style
+from cv_chat.ui import accounts, states, style  # none of these needs the Azure settings, so the error screens below always work
 
 style.inject()  # the stylesheet and its animations, also for the login page
 user = accounts.current_user()  # shows the login screen and stops the page until someone is logged in
@@ -15,10 +15,10 @@ try:
     from cv_chat.rag import ingest
     from cv_chat.ui import candidates, chat, library, sidebar
 except KeyError as missing:  # config.py raises KeyError for a value missing from .env
-    st.error(f"Missing {missing} in .env. Copy .env.example to .env and fill in your Azure values.", icon=":material/error:")
+    states.error(f"Missing {missing} in .env. Copy .env.example to .env, fill in your Azure values and restart the app.", "Check again")
     st.stop()
 except Exception as error:  # for example a malformed storage connection string
-    st.error(f"Could not connect to Azure: {error}. Check the values in .env.", icon=":material/error:")
+    states.error(f"Could not connect to Azure: {error}. Check the values in .env.", "Try again")
     st.stop()
 
 
@@ -32,7 +32,7 @@ ws = Workspace(user.id)  # built only from the logged-in user's id, so every cal
 try:
     _prepare_workspace(ws)
 except Exception as error:  # for example an index built for a different embedding model
-    st.error(f"Could not prepare the search index: {error}", icon=":material/error:")
+    states.error(f"Could not prepare your storage and search index: {error}", "Try again")
     st.stop()
 
 st.session_state.setdefault("messages", [])

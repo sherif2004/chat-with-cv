@@ -4,7 +4,7 @@ import streamlit as st
 from cv_chat import config, history
 from cv_chat.rag import qa
 from cv_chat.services import blob_storage
-from cv_chat.ui import chats, details, safe
+from cv_chat.ui import candidates, chats, details, safe, states, suggestions
 from cv_chat.workspace import Workspace
 
 ROUTE_NOTES = {
@@ -13,12 +13,6 @@ ROUTE_NOTES = {
     "complex": "Complex question · answered by the search agent",
 }
 AVATARS = {"user": ":material/person:", "assistant": ":material/auto_awesome:"}
-SUGGESTIONS = [
-    "Who has strong Python experience?",
-    "Compare cloud and DevOps skills",
-    "Who has the most work experience?",
-    "Summarize everyone's education",
-]
 
 
 SHOWN = 20  # messages drawn at first in a long chat, and added by each "Load earlier messages"
@@ -32,12 +26,12 @@ def render(ws: Workspace, cvs: list[str], has_cvs: bool) -> None:
     _scope(cvs)
     messages = st.session_state.messages
     if not messages and not question:
-        _welcome(has_cvs)
+        _welcome(ws, cvs, has_cvs)
     hidden = max(len(messages) - (st.session_state.get("shown_messages") or SHOWN), 0)
     if hidden:  # a long chat draws only its latest messages, so every click stays fast
         st.button(f"Load earlier messages ({hidden})", icon=":material/history:", type="tertiary", on_click=_load_earlier)
     for index in range(hidden, len(messages)):
-        _show(ws, messages[index], index)
+        _show(ws, messages[index], index, last=index == len(messages) - 1)
     if question:
         _answer(ws, question)
 
@@ -78,7 +72,7 @@ def _header(ws: Workspace) -> None:
                   on_click=chats.rename_chat, args=(ws, conversation_id, key))
 
 
-def _welcome(has_cvs: bool) -> None:
+def _welcome(ws: Workspace, cvs: list[str], has_cvs: bool) -> None:
     st.html(
         '<div class="cv-hero">'
         '<span class="cv-hero-eyebrow">Azure AI Search · Azure OpenAI</span>'
@@ -87,19 +81,41 @@ def _welcome(has_cvs: bool) -> None:
         "Every answer comes from the uploaded CVs, with its sources.</p>"
         "</div>"
     )
+    _checklist(ws, len(cvs))
     if not has_cvs:
-        st.info(f"Add at least {config.MIN_CVS} CVs in the Library to start chatting.", icon=":material/info:")
-        st.button("Open the Library", icon=":material/upload_file:", type="primary", on_click=_open_library)
+        states.empty(f"Add at least {config.MIN_CVS} CVs in the Library to start chatting.", "Open the Library", _open_library, icon=":material/upload_file:")
         return
     columns = st.columns(2)
-    for i, suggestion in enumerate(SUGGESTIONS):
+    for i, suggestion in enumerate(_starter_questions(ws, cvs)):
         columns[i % 2].button(
-            suggestion,
-            icon=":material/arrow_outward:",
-            width="stretch",
-            on_click=_suggest,
-            args=(suggestion,),
+            safe.esc(suggestion), icon=":material/arrow_outward:", width="stretch", on_click=_suggest, args=(suggestion,), key=f"starter_{i}",
         )
+
+
+def _starter_questions(ws: Workspace, cvs: list[str]) -> list[str]:
+    """Questions built from these CVs' titles, years and places; the fixed ones if that is not possible."""
+    try:
+        return suggestions.build(candidates.candidate_list(ws, cvs))
+    except Exception:  # starter questions are a nicety: never let them break the welcome screen
+        return suggestions.FIXED
+
+
+def _checklist(ws: Workspace, cv_count: int) -> None:
+    """Three first steps, shown until the user has had a chat."""
+    try:
+        if history.list_conversations(ws.user_id, 1):
+            return
+    except Exception:
+        return
+    steps = [
+        (cv_count >= config.MIN_CVS, f"Add at least {config.MIN_CVS} CVs in the Library ({min(cv_count, config.MIN_CVS)} of {config.MIN_CVS})"),
+        (False, "Ask your first question below"),
+        (False, "Open **Sources** and **Details** under the answer to check it"),
+    ]
+    with st.container(border=True):
+        st.markdown("**Getting started**")
+        for done, text in steps:
+            st.markdown((":green[:material/check_circle:]" if done else ":gray[:material/radio_button_unchecked:]") + f" {text}")
 
 
 def _open_library() -> None:
@@ -110,14 +126,55 @@ def _suggest(question: str) -> None:
     st.session_state.suggested_question = question
 
 
-def _show(ws: Workspace, message: dict, index: int | None = None) -> None:
+def _show(ws: Workspace, message: dict, index: int | None = None, last: bool = False) -> None:
     with st.chat_message(message["role"], avatar=AVATARS[message["role"]]):
         st.markdown(message["content"])
+        if message["role"] != "assistant":
+            return
+        if message.get("sources"):
+            _chips(ws, message["sources"])
+        _actions(ws, message, index, last)
         if message.get("trace"):
             _details(f"details_{st.session_state.get('conversation_id')}_{index}", message["trace"], message.get("sources", []))
         else:
             _route_note(message.get("route"))
         _sources(ws, message.get("sources", []))
+
+
+def _chips(ws: Workspace, sources: list[dict]) -> None:
+    """The CVs an answer is based on, as links that open the original file."""
+    names = list(dict.fromkeys(source["file_name"] for source in sources))
+    shown = [f"[{safe.esc(name)}]({link})" if (link := _link(ws, name)) else safe.esc(name) for name in names[:6]]
+    more = f" · +{len(names) - 6} more" if len(names) > 6 else ""
+    st.caption(":material/description: " + " · ".join(shown) + more)
+
+
+def _actions(ws: Workspace, message: dict, index: int | None, last: bool) -> None:
+    """Thumbs up or down, copy, and (on the latest answer) regenerate."""
+    message_id = message.get("id")
+    feedback_column, copy_column, regenerate_column, _ = st.columns([1.2, 1, 2.4, 5], vertical_alignment="center", gap="xsmall")
+    if message_id is not None:
+        key = f"feedback_{message_id}"
+        saved = message.get("feedback")
+        with feedback_column:
+            st.feedback("thumbs", key=key, default=None if saved is None else (1 if saved == 1 else 0), on_change=_feedback, args=(ws, message_id, key))
+    with copy_column.popover("", icon=":material/content_copy:", width="content", help="Copy the answer"):
+        st.code(message["content"], language=None, wrap_lines=True)
+    if last:
+        regenerate_column.button("Regenerate", icon=":material/refresh:", type="tertiary", on_click=_regenerate, help="Ask the same question again")
+
+
+def _feedback(ws: Workspace, message_id: int, key: str) -> None:
+    value = st.session_state.get(key)  # 0 is thumbs down, 1 thumbs up, None cleared
+    history.set_feedback(ws.user_id, message_id, None if value is None else (1 if value == 1 else -1))
+
+
+def _regenerate() -> None:
+    """Ask the last question again. The answer cache is skipped once, so a repeated question really is answered again."""
+    questions = [m["content"] for m in st.session_state.messages if m["role"] == "user"]
+    if questions:
+        st.session_state.suggested_question = questions[-1]
+        st.session_state.skip_cache_once = True
 
 
 def _details(key: str, trace: dict, sources: list[dict]) -> None:
@@ -135,13 +192,13 @@ def _answer(ws: Workspace, question: str) -> None:
             with st.status("Reading your question...", expanded=True) as status:
                 stream, sources, route, trace = qa.ask(
                     ws, question, history, expand=st.session_state.get("expand_queries", False),
-                    cache_answers=st.session_state.get("cache_answers", False), on_step=lambda step: st.write(safe.esc(step)),
+                    cache_answers=st.session_state.get("cache_answers", False) and not st.session_state.pop("skip_cache_once", False), on_step=lambda step: st.write(safe.esc(step)),
                     scope=st.session_state.get("chat_scope", []),
                 )
                 status.update(label="Done", state="complete", expanded=False)
             answer = st.write_stream(safe.no_images(stream))
         except Exception as error:
-            st.error(f"Could not answer: {str(error).splitlines()[0]}", icon=":material/error:")
+            states.error(f"Could not answer: {str(error).splitlines()[0]}", "Try again", _retry, (question,))
             return
         record = trace.to_dict()  # complete now that the answer has been written
         _sources(ws, sources)
@@ -152,6 +209,11 @@ def _answer(ws: Workspace, question: str) -> None:
     st.session_state.messages += exchange
     if _save(ws, question, exchange):
         st.rerun()  # the sidebar was drawn before this answer: redraw it so the chat list shows (and reorders) this chat
+
+
+def _retry(question: str) -> None:
+    st.session_state.suggested_question = question
+    st.session_state.skip_cache_once = True
 
 
 def _save(ws: Workspace, question: str, exchange: list[dict]) -> bool:
@@ -171,19 +233,27 @@ def _route_note(route: str | None) -> None:
 
 
 def _sources(ws: Workspace, sources: list[dict]) -> None:
-    """List the CVs an answer was based on, with a short excerpt from each."""
+    """One card per CV an answer was based on: who it is, the best excerpt and a link to the original file."""
     if not sources:
         return
-    excerpts: dict[str, list[str]] = {}
+    by_cv: dict[str, list[dict]] = {}
     for source in sources:
-        excerpts.setdefault(source["file_name"], []).append(source.get("caption") or source["content"])
-    with st.expander(f"Sources · {len(excerpts)} CV{'' if len(excerpts) == 1 else 's'}", icon=":material/menu_book:"):
-        for file_name, contents in excerpts.items():
-            link = _link(ws, file_name)
-            title = f"[{safe.esc(file_name)}]({link})" if link else safe.esc(file_name)
-            st.markdown(f":material/description: **{title}** · {len(contents)} excerpt{'' if len(contents) == 1 else 's'}")
-            snippet = " ".join(contents[0].split())
-            st.caption(safe.esc(snippet[:240]) + ("..." if len(snippet) > 240 else ""))
+        by_cv.setdefault(source["file_name"], []).append(source)
+    with st.expander(f"Sources · {len(by_cv)} CV{'' if len(by_cv) == 1 else 's'}", icon=":material/menu_book:"):
+        for file_name, chunks in by_cv.items():
+            first = chunks[0]
+            with st.container(border=True):
+                name_column, link_column = st.columns([4, 1], vertical_alignment="center")
+                name_column.markdown(f"**{safe.esc(first.get('candidate_name') or file_name)}**")
+                if link := _link(ws, file_name):
+                    link_column.link_button("Open", link, icon=":material/open_in_new:", width="stretch")
+                years = first.get("years_experience")
+                facts = [first.get("job_title"), f"{years:g} years" if years is not None else "", file_name]
+                st.caption(" · ".join(safe.esc(fact) for fact in facts if fact))
+                for chunk in chunks[:2]:
+                    snippet = " ".join((chunk.get("caption") or chunk["content"]).split())
+                    page = f" (p.{chunk['page']})" if chunk.get("page") else ""
+                    st.markdown(f"> {safe.esc(snippet[:220])}{'...' if len(snippet) > 220 else ''}{page}")
 
 
 def _link(ws: Workspace, file_name: str) -> str | None:

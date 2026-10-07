@@ -85,20 +85,21 @@ def load_messages(user_id: str, conversation_id: str) -> list[dict] | None:
         ).fetchone():
             return None
         rows = conn.execute(
-            "SELECT role, content, sources, route, trace FROM messages WHERE conversation_id = %s ORDER BY id",
+            "SELECT id, role, content, sources, route, trace, feedback FROM messages WHERE conversation_id = %s ORDER BY id",
             (conversation_id,),
         ).fetchall()
     messages = []
-    for role, content, sources, route, trace in rows:
-        message = {"role": role, "content": content}
+    for message_id, role, content, sources, route, trace, feedback in rows:
+        message = {"id": message_id, "role": role, "content": content}
         if role == "assistant":
-            message.update(sources=sources or [], route=route, trace=trace)
+            message.update(sources=sources or [], route=route, trace=trace, feedback=feedback)
         messages.append(message)
     return messages
 
 
 def add_messages(user_id: str, conversation_id: str, messages: list[dict]) -> bool:
-    """Append messages to one of the user's chats. False (and nothing saved) if it is not theirs."""
+    """Append messages to one of the user's chats. False (and nothing saved) if it is not theirs. Each message dict gets its
+    database id in "id", so it can be given feedback later."""
     if not _is_uuid(conversation_id):
         return False
     with db.pool().connection() as conn:
@@ -108,16 +109,28 @@ def add_messages(user_id: str, conversation_id: str, messages: list[dict]) -> bo
         ).fetchone():
             return False
         for message in messages:
-            conn.execute(
-                "INSERT INTO messages (conversation_id, role, content, sources, route, trace) VALUES (%s, %s, %s, %s, %s, %s)",
+            message["id"] = conn.execute(
+                "INSERT INTO messages (conversation_id, role, content, sources, route, trace) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
                 (
                     conversation_id, message["role"], message["content"],
                     Jsonb(message["sources"]) if message.get("sources") is not None else None,
                     message.get("route"),
                     Jsonb(message["trace"]) if message.get("trace") is not None else None,
                 ),
-            )
+            ).fetchone()[0]
     return True
+
+
+def set_feedback(user_id: str, message_id: int, value: int | None) -> bool:
+    """Thumbs up (1), thumbs down (-1) or none (None) on an answer in one of the user's chats."""
+    if value not in (1, -1, None) or not isinstance(message_id, int):
+        return False
+    with db.pool().connection() as conn:
+        return conn.execute(
+            "UPDATE messages SET feedback = %s WHERE id = %s AND role = 'assistant' AND conversation_id IN "
+            "(SELECT id FROM conversations WHERE user_id = %s) RETURNING 1",
+            (value, message_id, user_id),
+        ).fetchone() is not None
 
 
 def rename(user_id: str, conversation_id: str, title: str) -> bool:

@@ -126,7 +126,7 @@ Any text that comes from a CV is treated as data, not as instructions (see [Safe
 
 ## Accounts and Postgres
 
-Users sign up and log in with an email and password. Accounts, sessions and chats are stored in Postgres, which runs in Docker:
+Users sign up and log in with an email and password. If you forget your password, the **Forgot password** tab resets it with the recovery code you were given at sign-up (see below). Accounts, sessions and chats are stored in Postgres, which runs in Docker:
 
 ```bash
 docker compose up -d          # starts Postgres on 127.0.0.1:5432
@@ -134,21 +134,33 @@ cp .env.example .env          # DATABASE_URL is already filled in for this setup
 streamlit run app.py
 ```
 
-Passwords are stored as argon2 hashes. A login is a random token in a browser cookie; only its hash is stored in the database, and it expires after 14 days or when you log out. The session is checked against the database on every page run, so ending it on one device (log out, password change, account deletion) also ends an already-open tab on another device at its next click. Sign-ups are capped at 15 users, because each user gets their own search index and the Azure Basic tier allows 15.
+Passwords are stored as argon2 hashes, and the recovery code as a SHA-256 hash. A login is a random token in a browser cookie; only its hash is stored in the database, and it expires after 14 days or when you log out. The session is checked against the database on every page run, so ending it on one device (log out, password change, account deletion) also ends an already-open tab on another device at its next click. Sign-ups are capped at 15 users, because each user gets their own search index and the Azure Basic tier allows 15.
 
 Two things to change before the app is reachable from anywhere but your own machine:
 
 - The session cookie is written by a small script in the page, so it is not marked `HttpOnly` or `Secure`. Serve the app over HTTPS.
 - The Docker Postgres uses the password `cvchat` and listens only on `127.0.0.1`. Change the password in `docker-compose.yml` and `DATABASE_URL` if it is ever exposed.
 
+### Recovery code
+
+When you create an account, the app shows you a one-time **recovery code** (like `ABCD-EFGH-JKLM-NPQR`) and asks you to confirm you saved it. Keep it somewhere safe, such as a password manager. Only a hash of it is stored, so it can never be shown again. On the login page, **Forgot password** takes your email, the code and a new password. That sets the password, logs you out everywhere, and gives you a new code (the used one stops working). The code is forgiving about case, dashes and spaces. Accounts made before this feature can get their first code from the account menu (you enter your password). If you lose both your password and your code, the app cannot recover the account: someone with access to the database has to remove it.
+
 ### Account menu
 
 Your email at the top of the sidebar opens the account menu:
 
 - **Log out** ends this session.
+- **Recovery code** replaces your code with a new one after you enter your password.
 - **Chat settings** has **Query expansion** (also search two reworded versions of each question: finds more, answers start 1 to 2 seconds later), **Cache final answers** (reuse the answer to an identical question in an identical chat: off by default, because a cached answer can be out of date) and **Clear cache**.
 - **Change password** asks for the current password and logs you out on your other devices.
 - **Delete my account** (you type your email and enter your password to confirm) deletes your CVs, your search index, your saved chats and your account. Azure data is deleted first: if that fails, nothing else is removed and you can try again. It waits until CVs that are being processed have finished.
+
+### Answers and starting out
+
+- **First run.** Until you have had a chat, the welcome screen shows a three-step checklist (Add CVs, Ask, Check the sources). The starter questions are built from your own CVs, for example "Who has more than 15 years of experience?", "Compare the Engineers" or "Who is based in London?", with no model call. If there is too little data, fixed questions fill in.
+- **Under each answer.** Links to the CVs it used, thumbs up and down (saved with the answer, and shown again when you reopen the chat), a **Copy** menu, and **Regenerate** on the latest answer (it asks the same question again, skipping the answer cache, and keeps the earlier answer).
+- **Sources.** One card per CV with the candidate's name, job title, years, the best excerpt with its page, and an **Open** link.
+- **Messages.** Every empty screen and error says what happened and offers one button for the next step, such as **Open the Library**, **Clear the filters** or **Try again**.
 
 ### Chats
 
@@ -164,7 +176,7 @@ Every answer is saved, like in other chat apps. The sidebar holds only the chats
 
 ### Candidates view
 
-The **Candidates** switch above the chat shows one card per CV with the name, job title, years of experience, location and email read from the CV. Filter by text, set a minimum number of years, sort by name or experience, open the original CV, or press **Chat with this CV** to answer only from it. It reads the metadata of the first 1000 indexed chunks, so with very many CVs some may show without details.
+The **Candidates** switch above the chat shows one card per CV with the name, job title, years of experience, location and email read from the CV. Filter by text, set a minimum number of years, sort by name or experience, open the original CV, or press **Chat with this CV** to answer only from it. Tick **Compare** on up to three candidates to see them side by side (job title, years, location, email), then press **Ask the chat to compare them** to open a chat limited to those CVs with the question ready. It reads the metadata of the first 1000 indexed chunks, so with very many CVs some may show without details.
 
 ### Each user has their own data
 
@@ -292,7 +304,9 @@ chat-with-cv/
     │   └── retrieval.py          # embed, hybrid search, rank fusion, top-p selection, excerpt formatting
     └── ui/                   # Streamlit screens
         ├── accounts.py           # login and sign-up screen, session cookie, account menu
-        ├── candidates.py         # the Candidates view
+        ├── candidates.py         # the Candidates view: cards, filters, compare
+        ├── suggestions.py        # starter questions built from the CVs
+        ├── states.py             # the shared look of empty and error messages
         ├── chats.py              # the chat list: search, grouping by age, open, rename, delete
         ├── sidebar.py            # the sidebar: chat list and a progress bar while CVs are processed
         ├── library.py            # the Library: upload, progress, the table of CVs, open / re-index / delete
@@ -447,6 +461,7 @@ Most problems now show a message that says what to check. These are the ones you
 
 | What you see | What it means and what to do |
 |---|---|
+| `Wrong email or recovery code.` on Forgot password | The email or code is wrong, or the code was already used (each reset issues a new one). Check you are using the newest code. Accounts without a code cannot be reset: log in with the password and get a code from the account menu |
 | `Could not reach Postgres` on the login screen | Postgres is not running. Start it with `docker compose up -d` and reload the page |
 | `Could not set up your storage, so the account was not created` | Azure refused to create the new user's container or search index (check the Azure values in `.env` and the index limit of your search tier). Nothing was created, so you can try again |
 | `Your session has ended. Log in again.` | Your session was ended elsewhere (you logged out, changed your password or deleted the account on another device) or it expired after 14 days. Log in again |

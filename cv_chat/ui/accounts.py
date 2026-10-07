@@ -48,6 +48,7 @@ def current_user() -> auth.User:
     ended = False
     if user := st.session_state.get("user"):
         if auth.user_for_token(st.session_state.get("token")) == user:  # asked again on every page run, so a session ended elsewhere stops working here
+            _recovery_gate()
             return user
         st.session_state.clear()
         ended = True
@@ -59,42 +60,74 @@ def current_user() -> auth.User:
     with screen.container():
         if ended:
             st.warning("Your session has ended. Log in again.", icon=":material/lock:")
-        token = _login_screen()
+        token, new_code = _login_screen()
     if token is None:
         st.stop()
     screen.empty()
     _write_cookie(token, auth.SESSION_DAYS * 86400)  # no rerun: the script must stay on the page until the browser has run it
     st.session_state["user"], st.session_state["token"] = auth.user_for_token(token), token
+    if new_code:
+        st.session_state["recovery_code"] = new_code
+    _recovery_gate()
     return st.session_state["user"]
 
 
-def _login_screen() -> str | None:
-    """The login and sign-up forms. Returns a session token once someone has logged in or signed up."""
+def _recovery_gate() -> None:
+    """Shows a new recovery code, once, until the user confirms they saved it. Only its hash is stored, so it cannot be shown again."""
+    code = st.session_state.get("recovery_code")
+    if not code:
+        return
+    _, middle, _ = st.columns([1, 2, 1])
+    with middle:
+        st.html('<div class="cv-brand"><div class="cv-brand-name">Save your recovery code</div></div>')
+        with st.container(border=True):
+            st.markdown("If you ever forget your password, this code lets you set a new one. **It is shown only once.**")
+            st.code(code, language=None)
+            st.caption("Keep it somewhere safe, such as a password manager. Anyone who has it can reset your password.")
+            saved = st.checkbox("I have saved my recovery code")
+            if st.button("Continue", type="primary", disabled=not saved, width="stretch"):
+                del st.session_state["recovery_code"]
+                st.rerun()
+    st.stop()
+
+
+def _login_screen() -> tuple[str | None, str | None]:
+    """The login, sign-up and forgot-password forms. Returns (session token, new recovery code or None) once someone is in."""
     _, middle, _ = st.columns([1, 2, 1])
     with middle:
         st.html('<div class="cv-brand"><div class="cv-brand-name">CV Chat</div><div class="cv-brand-tag">Ask questions about your candidates</div></div>')
         with st.container(border=True):
-            login_tab, signup_tab = st.tabs(["Log in", "Sign up"])
+            login_tab, signup_tab, forgot_tab = st.tabs(["Log in", "Sign up", "Forgot password"])
             with login_tab, st.form("login", border=False):
                 email = st.text_input("Email", autocomplete="email")
                 password = st.text_input("Password", type="password", autocomplete="current-password")
                 if st.form_submit_button("Log in", type="primary", width="stretch"):
                     try:
-                        return auth.log_in(email, password)
+                        return auth.log_in(email, password), None
                     except auth.AuthError as error:
                         st.error(str(error))
             with signup_tab, st.form("signup", border=False):
                 email = st.text_input("Email", key="signup_email", autocomplete="email")
-                password = st.text_input(
-                    f"Password (at least {auth.MIN_PASSWORD} characters)", type="password", key="signup_password", autocomplete="new-password",
-                )
+                password = st.text_input("Password", type="password", key="signup_password", autocomplete="new-password")
+                st.caption(f"At least {auth.MIN_PASSWORD} characters. A few words in a row make a strong, easy-to-remember password.")
                 if st.form_submit_button("Create account", type="primary", width="stretch"):
                     try:
-                        auth.sign_up(email, password, on_created=_provision)
-                        return auth.log_in(email, password)
+                        user = auth.sign_up(email, password, on_created=_provision)
+                        return auth.log_in(email, password), auth.issue_recovery_code(user.id)
                     except auth.AuthError as error:
                         st.error(str(error))
-    return None
+            with forgot_tab, st.form("forgot", border=False):
+                st.caption("Use the recovery code you were given when you created your account.")
+                email = st.text_input("Email", key="forgot_email", autocomplete="email")
+                code = st.text_input("Recovery code", key="forgot_code", placeholder="XXXX-XXXX-XXXX-XXXX")
+                password = st.text_input(f"New password (at least {auth.MIN_PASSWORD} characters)", type="password", key="forgot_password", autocomplete="new-password")
+                if st.form_submit_button("Reset password", type="primary", width="stretch"):
+                    try:
+                        new_code = auth.reset_password(email, code, password)
+                        return auth.log_in(email, password), new_code
+                    except auth.AuthError as error:
+                        st.error(str(error))
+    return None, None
 
 
 def account_menu(user: auth.User) -> None:
@@ -130,6 +163,11 @@ def account_menu(user: auth.User) -> None:
                 except auth.AuthError as error:
                     st.error(str(error))
         st.divider()
+        st.markdown("**Recovery code**")
+        st.caption("A new code replaces the old one. Accounts made before recovery codes existed can get their first code here.")
+        st.text_input("Your password", type="password", key="recovery_password", autocomplete="current-password")
+        st.button("Get a new recovery code", icon=":material/key:", width="stretch", on_click=_new_recovery_code, args=(user,))
+        st.divider()
         st.markdown("**Delete my account**")
         st.caption("This deletes your CVs, your search index, your chats and your account. It cannot be undone.")
         confirm = st.text_input("Type your email to confirm", key="delete_confirm")
@@ -140,6 +178,13 @@ def account_menu(user: auth.User) -> None:
                 _delete_account(user)
             else:
                 st.error("Wrong password.")
+
+
+def _new_recovery_code(user: auth.User) -> None:
+    if not auth.check_password(user.id, st.session_state.get("recovery_password", "")):
+        st.toast("Wrong password.", icon=":material/error:")
+        return
+    st.session_state["recovery_code"] = auth.issue_recovery_code(user.id)  # shown by _recovery_gate on the next run
 
 
 def _clear_cache(user: auth.User) -> None:

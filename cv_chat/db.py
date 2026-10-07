@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE users ADD COLUMN IF NOT EXISTS recovery_hash text;  -- SHA-256 of the one-time recovery code
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash text PRIMARY KEY,
     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages(conversation_id, id);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS feedback smallint;  -- 1 thumbs up, -1 thumbs down
 """
 
 _pool: ConnectionPool | None = None

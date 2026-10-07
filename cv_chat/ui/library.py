@@ -7,7 +7,7 @@ import streamlit as st
 from cv_chat import config
 from cv_chat.rag import ingest, jobs
 from cv_chat.services import blob_storage
-from cv_chat.ui import candidates
+from cv_chat.ui import candidates, states
 from cv_chat.ui.safe import esc
 from cv_chat.workspace import Workspace
 
@@ -28,10 +28,7 @@ def cv_names(ws: Workspace) -> list[str]:
         st.session_state.cv_list = (time.monotonic(), names)
         return names
     except Exception as error:
-        st.error(
-            f"Could not list the CVs: {str(error).splitlines()[0]}. Check AZURE_STORAGE_CONNECTION_STRING in .env.",
-            icon=":material/error:",
-        )
+        states.error(f"Could not list the CVs: {str(error).splitlines()[0]}. Check AZURE_STORAGE_CONNECTION_STRING in .env.", "Try again")
         return []
 
 
@@ -50,7 +47,7 @@ def render(ws: Workspace, cvs: list[str]) -> None:
     progress(ws)
 
     if not cvs:
-        st.info("No CVs yet. Add some above to get started.", icon=":material/upload_file:")
+        states.empty("No CVs yet. Drop some PDF or DOCX files in the box above, then press Process CVs.", icon=":material/upload_file:")
         return
     _table(ws, cvs)
 
