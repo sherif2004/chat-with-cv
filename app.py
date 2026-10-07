@@ -38,7 +38,9 @@ except Exception as error:  # for example an index built for a different embeddi
 st.session_state.setdefault("messages", [])
 sidebar.render(ws)
 cvs = library.cv_names(ws)
-view = st.segmented_control("View", ["Chat", "Candidates", "Library"], key="view", default="Chat", label_visibility="collapsed")
+if st.session_state.get("view") is None:  # first visit, or the user clicked the selected view again
+    st.session_state["view"] = "Chat"
+view = st.segmented_control("View", ["Chat", "Candidates", "Library"], key="view", label_visibility="collapsed")  # no default: buttons set the view through session state
 if view == "Candidates":  # only the chosen view is drawn, so the other pages cost nothing
     candidates.render(ws, cvs)
 elif view == "Library":

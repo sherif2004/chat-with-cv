@@ -40,7 +40,8 @@ def render(ws: Workspace, cvs: list[str]) -> None:
     candidates = candidate_list(ws, cvs)
     search_column, years_column, sort_column = st.columns([3, 2, 2])
     text = search_column.text_input("Filter", placeholder="Name, title, location or file", label_visibility="collapsed", key="candidate_filter").strip().lower()
-    min_years = years_column.number_input("Minimum years", min_value=0, max_value=60, value=0, step=1, help="Minimum years of experience", key="candidate_min_years")
+    st.session_state.setdefault("candidate_min_years", 0)  # no value= below: "Clear the filters" resets it through session state
+    min_years = years_column.number_input("Minimum years", min_value=0, max_value=60, step=1, help="Minimum years of experience", key="candidate_min_years")
     sort = sort_column.selectbox("Sort", list(SORTS), label_visibility="collapsed")
 
     shown = [
