@@ -192,6 +192,12 @@ def list_profiles(ws: Workspace) -> dict[str, dict]:
     return profiles
 
 
+def cvs_mentioning(ws: Workspace, words: str) -> set[str]:
+    """File names of the CVs whose text contains every one of the words."""
+    results = _client(ws).search(words, search_fields=["content"], search_mode="all", select=["file_name"], top=1000)
+    return {result["file_name"] for result in results}
+
+
 def metadata_filter(job_title: str | None = None) -> str | None:
     """An OData filter on the CV metadata: every word of the job title must appear in the title read from the CV."""
     if job_title and (words := " ".join(job_title.replace("'", " ").split())):

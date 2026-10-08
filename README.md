@@ -98,6 +98,8 @@ flowchart TD
 ```
 
 1. **Route and rewrite the question.** One quick model call decides whether the message needs a search at all (*chat*: greetings and thanks do not), needs one search (*simple*), or is *complex* (comparing, ranking, counting or listing across many CVs, or several questions in one). It also turns a follow-up like "what about his education?" into a standalone **English** search query using the recent chat (the CVs are English, so this works for a question asked in any language), and picks which CV sections hold the answer (for example `education`). If this step fails, the original question is searched as it is.
+
+   Two more outcomes come from the same call. If the question cannot be answered without a missing detail ("who is the best?"), the app **asks a short clarifying question** instead of guessing, and does not search. If you ask for a specific job role ("find a data engineer"), the role is checked first: it must be in a CV's job title or text. If no CV has it, the app says so and lists the job titles that exist, instead of returning loosely related candidates; if some do, only those CVs are searched.
 2. **Query expansion (optional, in the account menu under Chat settings).** The question is also reworded two ways and each version is searched; the result lists are merged with reciprocal rank fusion, so a chunk found by several queries rises to the top.
 3. **Embed the query** the same way as the chunks. Embeddings of repeated queries are cached in memory.
 4. **Hybrid search, filtered by section.** Azure AI Search runs two searches in one query and merges the rankings:
@@ -391,7 +393,7 @@ The reasoning, limits and costs behind each part of the chat side.
 
 ### Router and citations
 
-- **Router.** One model call classifies each message as *chat* (greetings, thanks, off-topic: no search), *simple* (one search) or *complex* (handled by the agent), and rewrites it into a standalone English search query. It is the same call that picks the CV sections, so it adds no second call.
+- **Router.** One model call classifies each message as *chat* (greetings, thanks, off-topic: no search), *simple* (one search), *complex* (handled by the agent) or *clarify* (it asks you for the missing detail), reads the job role if you asked for one, and rewrites it into a standalone English search query. It is the same call that picks the CV sections, so it adds no second call.
 - **Inline citations.** Answers cite their evidence as `[file name, p.N]` next to each claim, using the page number stored with every chunk. When comparing candidates, each gets their own heading.
 - *Why:* no wasted searches on "hi" or "thanks", and every claim can be traced to a CV and page.
 

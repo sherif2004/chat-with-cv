@@ -8,7 +8,7 @@ from typing import NamedTuple
 
 from cv_chat import config
 from cv_chat.processing.sections import SECTION_TYPES
-from cv_chat.rag import agent, ingest, retrieval
+from cv_chat.rag import agent, ingest, retrieval, roles
 from cv_chat.rag.cache import ANSWER, CHAT, ROUTE, Cache, cache_for
 from cv_chat.rag.trace import Trace
 from cv_chat.services import openai_service
@@ -35,16 +35,22 @@ CHAT_PROMPT = """You are the assistant of a "chat with CVs" app. The user's mess
 Do not state any fact about a candidate. If they ask what you can do, say you answer questions about the uploaded CVs."""
 
 ROUTER_PROMPT = f"""You prepare a message for a chat over a set of candidate CVs.
-Given the chat so far and the latest message, reply with JSON: {{"route": "...", "query": "...", "sections": [...]}}.
+Given the chat so far and the latest message, reply with JSON: {{"route": "...", "query": "...", "sections": [...], "role": "...", "ask": "..."}}.
 - "route": one of
   "chat"    - a greeting, thanks, or anything that needs no CV search;
   "simple"  - a question that one search over the CVs can answer;
-  "complex" - comparing, ranking, counting or listing across many CVs, or a question with several parts.
+  "complex" - comparing, ranking, counting or listing across many CVs, or a question with several parts;
+  "clarify" - the message cannot be answered without a missing detail that neither the message nor the chat gives
+              (for example "who is the best?" without saying for what). Use it rarely: when a sensible reading exists, use "simple".
+              Never use it when the previous assistant message was already a clarifying question; answer with the best reading.
 - "query": the latest message rewritten to stand alone, with pronouns and references resolved from the chat.
   Keep every skill and number. Write it in English whatever language the message is in, because the CVs are in English
   (write names in Latin letters when you can). If it already stands alone in English, repeat it unchanged.
 - "sections": the CV sections that hold the answer, chosen only from {SECTION_TYPES}.
-  Use [] when the question is about the whole CV or you are unsure."""
+  Use [] when the question is about the whole CV or you are unsure.
+- "role": the job title the user wants candidates for, only when the message asks to find or filter candidates by one specific
+  job role (for example "find a data engineer"), written in English. "" for a skill, a person's name, or no role.
+- "ask": for "clarify" only, one short question that gets the missing detail, in the language of the message. "" otherwise."""
 
 EXPAND_PROMPT = f"""You help search a set of candidate CVs. Given a search query, reply with JSON: {{"queries": ["...", "..."]}}
 with exactly {config.EXPANDED_QUERIES} alternative queries that look for the same thing:
@@ -52,7 +58,7 @@ with exactly {config.EXPANDED_QUERIES} alternative queries that look for the sam
 2. worded the way a CV would say it (for "built APIs" write "designed and developed REST services").
 Keep every name and number from the query. Do not add requirements the query does not have."""
 
-ROUTES = ("chat", "simple", "complex")
+ROUTES = ("chat", "simple", "complex", "clarify")
 
 
 class Answer(NamedTuple):
@@ -67,6 +73,8 @@ class Route:
     kind: str  # one of ROUTES
     query: str  # the message rewritten to stand alone
     sections: list[str]
+    role: str = ""  # a specific job role the user asked for, if any
+    ask: str = ""  # the question to put to the user, for the "clarify" kind
 
 
 def _route(cache: Cache, question: str, history: list[dict], trace: Trace | None = None) -> Route:
@@ -96,7 +104,11 @@ def _route(cache: Cache, question: str, history: list[dict], trace: Trace | None
         kind = data.get("route") if data.get("route") in ROUTES else "simple"
         query = str(data.get("query") or "").strip() or question
         sections = [name for name in data.get("sections", []) if name in SECTION_TYPES]
-        route = Route(kind, query, sections)
+        role = " ".join(str(data.get("role") or "").split())[:80]
+        ask = " ".join(str(data.get("ask") or "").split())[:300]
+        if kind == "clarify" and not ask:
+            kind = "simple"  # nothing to ask: answer with the best reading
+        route = Route(kind, query, sections, role, ask if kind == "clarify" else "")
     except Exception:  # routing only improves the search, so a failure must never block the answer
         return done(Route("simple", question, []), cached=False, failed=True)  # not cached: the next try may work
     cache.put(ROUTE, key, route, token)
@@ -244,7 +256,7 @@ def ask(
         token = cache.token()
     stream, sources, route, _ = _answer(ws, cache, question, history, expand, on_step, trace, scope)
     trace.route = route
-    if cache_answers:
+    if cache_answers and route != "clarify":  # a clarifying question depends on the chat, so it is never reused
         stream = _remember(cache, stream, sources, route, key, token)
     return Answer(_timed(stream, trace), sources, route, trace)
 
@@ -264,6 +276,19 @@ def _answer(
         # so it must not depend on, or carry anything from, one particular conversation.
         messages = [{"role": "system", "content": CHAT_PROMPT}, {"role": "user", "content": question}]
         return Answer(_remember_chat(cache, openai_service.chat_stream(messages), question, token), [], "chat")
+    if route.kind == "clarify":  # nothing to search yet: ask what is missing
+        on_step("The question needs more detail")
+        return Answer(iter([route.ask]), [], "clarify")
+    if route.role:  # a specific role was asked for: it must exist in the CVs, and only the CVs that have it are used
+        on_step(f"Checking that the role '{route.role}' exists in the CVs")
+        try:
+            have, titles = roles.find(ws, route.role, scope)
+        except Exception as error:  # the check only narrows the search, so a failure must never block the answer
+            log.warning("role check failed, answering without it: %s", error)
+        else:
+            if not have:
+                return Answer(iter([roles.missing_message(route.role, titles)]), [], "role_missing")
+            scope = have
     if route.kind == "complex":  # needs more than the best chunks: let the agent plan its own searches
         on_step("Complex question: planning the searches")
         try:
