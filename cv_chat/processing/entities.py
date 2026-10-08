@@ -14,21 +14,20 @@ from cv_chat import config
 
 log = logging.getLogger(__name__)
 
-LABELS = {  # the question put to the model for each detail
-    "candidate_name": "full name of the candidate",
-    "job_title": "current job title",
+LABELS = {  # the label the model is asked for, one at a time (asking for all together found much less)
+    "candidate_name": "person name",
+    "job_title": "job title",
     "email": "email address",
     "phone": "phone number",
-    "location": "city and country where the candidate lives",
+    "location": "city, country",
 }
 EMPTY = {"candidate_name": "", "job_title": "", "email": "", "phone": "", "location": ""}
-PAGES = 2  # the details are on the first pages
+PAGES = 1  # the details are on the first page: reading the second only added wrong answers (measured) and doubled the time
 WINDOW_WORDS = 150  # the model reads about 384 tokens at a time
 PAGE_CHARS = 8000  # the most of one page that is read
 THRESHOLD = 0.3  # the lowest confidence the model's answer may have
 
 _lock = threading.Lock()  # one reading at a time: the ingest threads share the model
-_KEY = {label: key for key, label in LABELS.items()}
 
 
 @lru_cache(maxsize=1)
@@ -37,7 +36,9 @@ def _model():
     try:
         from gliner import GLiNER
 
-        return GLiNER.from_pretrained(config.NER_MODEL)
+        import torch
+
+        return GLiNER.from_pretrained(config.NER_MODEL, map_location="cuda" if torch.cuda.is_available() else "cpu")  # a GPU, if there is one
     except Exception as error:
         raise RuntimeError(
             f"The NER model '{config.NER_MODEL}' could not be loaded ({str(error).splitlines()[0] if str(error) else type(error).__name__}). "
@@ -74,12 +75,12 @@ def extract(pages: list[tuple[int, str]]) -> dict:
     """The candidate's name, job title, email, phone and location from the first pages of a CV."""
     model = _model()
     best: dict[str, tuple[str, float]] = {}
-    for _, text in pages[:PAGES]:
-        for window in _windows(text[:PAGE_CHARS]):
+    windows = [window for _, text in pages[:PAGES] for window in _windows(text[:PAGE_CHARS])]
+    for key, label in LABELS.items():
+        for window in windows:
             with _lock:
-                found = model.predict_entities(window, list(LABELS.values()), threshold=THRESHOLD)
+                found = model.predict_entities(window, [label], threshold=THRESHOLD)
             for entity in found:
-                key = _KEY[entity["label"]]
                 if key not in best or entity["score"] > best[key][1]:
                     best[key] = (entity["text"], entity["score"])
     return {**EMPTY, **{key: _clean(text) for key, (text, _) in best.items()}}

@@ -7,5 +7,5 @@ docling>=2.0.0
 openai>=3.24.0
 psycopg[binary,pool]>=3.2.0
 python-dotenv>=1.2.4
-gliner>=0.2.0
+gliner>=0.2.0  # the generic NER; the model (1.5 GB) downloads the first time a CV is read; needs PyTorch, which docling already brings
 streamlit>=1.65.0

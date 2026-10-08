@@ -63,4 +63,4 @@ AGENT_MAX_ROUNDS = 5  # tool-using rounds the agent may take for one complex que
 AGENT_MAX_SECONDS = 30  # time budget for those rounds; afterwards it answers from what it has found
 AGENT_CV_CHARS = 12000  # most characters of one CV that get_cv hands to the model
 AGENT_SEARCH_K = 20  # most excerpts one search_cvs call hands to the model
-NER_MODEL = "urchade/gliner_small-v2.1"  # the generic NER model (GLiNER, Apache-2.0) that reads name, title, email, phone and location
+NER_MODEL = "urchade/gliner_medium-v2.1"  # the generic NER model (GLiNER medium, Apache-2.0, 1.5 GB) that reads name, title, email, phone and location
