@@ -1,7 +1,7 @@
 """Main area: chat with the indexed CVs."""
 import streamlit as st
 
-from cv_chat import config, history
+from cv_chat import history
 from cv_chat.rag import qa
 from cv_chat.services import blob_storage
 from cv_chat.ui import candidates, chats, details, safe, states, suggestions
@@ -83,7 +83,7 @@ def _welcome(ws: Workspace, cvs: list[str], has_cvs: bool) -> None:
     )
     _checklist(ws, len(cvs))
     if not has_cvs:
-        states.empty(f"Add at least {config.MIN_CVS} CVs in the Library to start chatting.", "Open the Library", _open_library, icon=":material/upload_file:")
+        states.empty("Add your CVs in the Library to start chatting.", "Open the Library", _open_library, icon=":material/upload_file:")
         return
     columns = st.columns(2)
     for i, suggestion in enumerate(_starter_questions(ws, cvs)):
@@ -108,7 +108,7 @@ def _checklist(ws: Workspace, cv_count: int) -> None:
     except Exception:
         return
     steps = [
-        (cv_count >= config.MIN_CVS, f"Add at least {config.MIN_CVS} CVs in the Library ({min(cv_count, config.MIN_CVS)} of {config.MIN_CVS})"),
+        (cv_count >= 1, f"Add your CVs in the Library ({cv_count} so far)"),
         (False, "Ask your first question below"),
         (False, "Open **Sources** and **Details** under the answer to check it"),
     ]

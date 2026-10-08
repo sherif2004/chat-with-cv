@@ -46,7 +46,7 @@ def _get_converter():
 
         options = PdfPipelineOptions(
             do_ocr=True,  # scanned PDFs and text inside images
-            accelerator_options=AcceleratorOptions(device=config.DOCLING_DEVICE),
+            accelerator_options=AcceleratorOptions(),  # its default is to pick a GPU when there is one, otherwise the CPU
         )
         _converter = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)})
         _converter.initialize_pipeline(InputFormat.PDF)

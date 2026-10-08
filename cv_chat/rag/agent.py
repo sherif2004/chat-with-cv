@@ -112,7 +112,7 @@ class _Run:
         file_ids = [ingest.file_id_for(name) for name in cvs] or None
         where = search_index.metadata_filter(job_title)
         per_cv = min(max(int(per_cv or (2 if cvs else 1)), 1), 5)
-        results = retrieval.spread_over_cvs(retrieval.search(self.ws, query, [], file_ids, where, self.trace), per_cv, config.AGENT_SEARCH_K)
+        results = retrieval.spread_over_cvs(retrieval.search(self.ws, query, [], file_ids, where, self.trace), per_cv, config.CONTEXT_CHARS // 2)
         found = len({chunk["file_name"] for chunk in results})
         note = " (metadata filter applied)" if where else ""
         return f"{found} CV{'' if found == 1 else 's'} matched{note}.\n\n" + self._show(results)
@@ -127,7 +127,7 @@ class _Run:
         shown, size = [], 0
         for chunk in chunks:  # whole excerpts only, so a closing tag is never cut off
             size += len(chunk["content"])
-            if shown and size > config.AGENT_CV_CHARS:
+            if shown and size > config.CONTEXT_CHARS // 2:
                 break
             shown.append(chunk)
         text = self._show(shown)

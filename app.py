@@ -14,7 +14,6 @@ with profile.phase("account menu"):
 
 try:
     with profile.phase("imports"):
-        from cv_chat import config
         from cv_chat.workspace import Workspace
         from cv_chat.rag import ingest
         from cv_chat.ui import candidates, chat, library, sidebar
@@ -55,5 +54,5 @@ with profile.phase(f"view: {view}"):
         library.render(ws, cvs)
     else:
         style.inject(reading_column=True)
-        chat.render(ws, cvs, has_cvs=len(cvs) >= config.MIN_CVS)
+        chat.render(ws, cvs, has_cvs=bool(cvs))
 profile.finish()

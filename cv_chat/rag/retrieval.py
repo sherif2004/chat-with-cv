@@ -1,6 +1,7 @@
 """Finding CV chunks for a question: embed, hybrid search, merge several searches, spread over CVs."""
 import math
 import re
+import statistics
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -41,10 +42,7 @@ def search(
     embed_start = time.perf_counter()
     vector = list(embed_question(query))
     info["embed_ms"] = round((time.perf_counter() - embed_start) * 1000, 1)
-    results = search_index.hybrid_search(ws, query, vector, config.RETRIEVE_K, sections, file_ids, where)
-    if sections and len(results) < config.MIN_FILTERED_RESULTS:  # the CVs may use unusual headings: search everything
-        info["fallback"] = True
-        results = search_index.hybrid_search(ws, query, vector, config.RETRIEVE_K, file_ids=file_ids, where=where)
+    results = _hybrid(ws, query, vector, sections, file_ids, where)
     cache.put(SEARCH, key, results, token)
     return record(results)
 
@@ -76,6 +74,17 @@ def retrieve(
     return rank_cvs(results)
 
 
+def _hybrid(ws: Workspace, query: str, vector: list[float], sections: list[str], file_ids: list[str] | None, where: str | None) -> list[dict]:
+    """When the router picked sections, search those sections and everything at the same time and merge the two lists, so
+    a CV with unusual headings is still found and no "too few hits" threshold is needed."""
+    if not sections:
+        return search_index.hybrid_search(ws, query, vector, config.RETRIEVE_K, file_ids=file_ids, where=where)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        focused = pool.submit(search_index.hybrid_search, ws, query, vector, config.RETRIEVE_K, sections, file_ids, where)
+        everything = pool.submit(search_index.hybrid_search, ws, query, vector, config.RETRIEVE_K, None, file_ids, where)
+        return fuse([focused.result(), everything.result()])
+
+
 def _weights(results: list[dict]) -> list[float]:
     """How relevant each result is, from 0 to 1 (its score divided by the best score). Without scores (the search service
     returned none) the rank stands in for them, which makes every result look about equally relevant."""
@@ -86,51 +95,69 @@ def _weights(results: list[dict]) -> list[float]:
     return [score / best for score in scores]
 
 
-def _nucleus(weights: list[float], top_p: float, limit: int) -> int:
-    """How many of the weights (best first) to keep: the fewest that hold `top_p` of the total share, but at least one
-    and at most `limit`. A share is the weight's softmax, so a clear winner takes most of it and a close field shares it."""
-    exps = [math.exp(weight / config.TOP_P_TEMPERATURE) for weight in weights]
+def _temperature(weights: list[float]) -> float:
+    """How sharply a higher relevance is favoured, taken from how spread out this search's relevances are: a search with one
+    clear winner among weak results has a wide spread, so the winner takes most of the share; a search whose results are all
+    alike has none, so they share it. A small floor keeps a perfectly flat list from dividing by zero."""
+    return max(statistics.pstdev(weights), 0.05)
+
+
+def _nucleus(weights: list[float], top_p: float, temperature: float) -> int:
+    """How many of the weights (best first) to keep: the fewest that hold `top_p` of the total share, and at least one.
+    A share is the weight's softmax, so a clear winner takes most of it and a close field shares it."""
+    top = max(weights)
+    exps = [math.exp((weight - top) / temperature) for weight in weights]  # relative to the best, so nothing overflows
     total = sum(exps)
     covered = 0.0
     for count, value in enumerate(exps, start=1):
         covered += value / total
-        if covered >= top_p or count >= limit:
+        if covered >= top_p:
             return count
     return len(weights)
 
 
-def rank_cvs(
-    results: list[dict], top_p: float = config.TOP_P, max_cvs: int = config.MAX_CVS, max_chunks: int = config.MAX_CHUNKS_PER_CV
-) -> list[dict]:
+def rank_cvs(results: list[dict], top_p: float = config.TOP_P, budget: int = config.CONTEXT_CHARS) -> list[dict]:
     """Keep what is relevant instead of a fixed number. Top-p is applied twice:
-    - candidates: a CV is as relevant as its best chunk; the best CVs are kept until they hold `top_p` of the relevance
-      (at most `max_cvs`), so a question about one person keeps one or two and a broad question keeps many;
-    - excerpts: for each kept CV, its best chunks are kept the same way (at most `max_chunks`).
+    - candidates: a CV is as relevant as its best chunk; the best CVs are kept until they hold `top_p` of the relevance,
+      so a question about one person keeps one or two and a broad question keeps many;
+    - excerpts: for each kept CV, its best chunks are kept the same way.
+    Then excerpts are added, most relevant CV first, until `budget` characters are used (the first excerpt always goes in).
     The result lists the CVs best first, each with its chunks in reading order, so the model sees a candidate's excerpts together."""
     if not results:
         return []
     weights = _weights(results)
+    temperature = _temperature(weights)
     groups: dict[str, list[tuple[float, dict]]] = {}
     for weight, chunk in zip(weights, results):
         groups.setdefault(chunk["file_name"], []).append((weight, chunk))
     cvs = sorted(((max(w for w, _ in group), sorted(group, key=lambda item: -item[0])) for group in groups.values()), key=lambda cv: -cv[0])
-    picked = []
-    for _, group in cvs[: _nucleus([best for best, _ in cvs], top_p, max_cvs)]:
-        kept = group[: _nucleus([weight for weight, _ in group], top_p, max_chunks)]
-        picked += [chunk for _, chunk in sorted(kept, key=lambda item: (item[1].get("page") is None, item[1].get("page") or 0))]
+    picked, used = [], 0
+    for _, group in cvs[: _nucleus([best for best, _ in cvs], top_p, temperature)]:
+        kept = []
+        for _, chunk in group[: _nucleus([weight for weight, _ in group], top_p, temperature)]:
+            if (picked or kept) and used + len(chunk["content"]) > budget:
+                break
+            kept.append(chunk)
+            used += len(chunk["content"])
+        picked += sorted(kept, key=lambda chunk: (chunk.get("page") is None, chunk.get("page") or 0))
+        if used >= budget:
+            break
     return picked
 
 
-def spread_over_cvs(results: list[dict], per_cv: int, limit: int) -> list[dict]:
-    """Keep the ranking but allow each CV only a few chunks, so a search reaches many CVs (used by the agent)."""
+def spread_over_cvs(results: list[dict], per_cv: int, budget: int) -> list[dict]:
+    """Keep the ranking but allow each CV only a few chunks, so a search reaches many CVs (used by the agent), until `budget`
+    characters of text are used (the first result always goes in)."""
     taken: Counter[str] = Counter()
-    picked = []
+    picked, used = [], 0
     for result in results:
-        if taken[result["file_name"]] < per_cv:
-            taken[result["file_name"]] += 1
-            picked.append(result)
-        if len(picked) == limit:
+        if taken[result["file_name"]] >= per_cv:
+            continue
+        if picked and used + len(result["content"]) > budget:
             break
+        taken[result["file_name"]] += 1
+        picked.append(result)
+        used += len(result["content"])
     return picked
 
 

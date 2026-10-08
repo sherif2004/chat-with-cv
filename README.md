@@ -36,7 +36,7 @@ Every answer comes from the uploaded CVs, is written in the language you asked i
 | Step | What you do | What the app does |
 |---|---|---|
 | 0. Account | Sign up or log in | Gives you your own CV storage, search index and saved chats |
-| 1. Upload | Drop PDF or DOCX CVs in the **Library** (at least 8 in total) | Reads and stores them |
+| 1. Upload | Drop PDF or DOCX CVs in the **Library** | Reads and stores them |
 | 2. Process | Click **Process CVs** | Reads each CV's layout, splits it by section and makes it searchable, several CVs at the same time. CVs that are already indexed and unchanged are skipped |
 | 3. Ask | Type a question in the chat, in any language | Works out what kind of question it is, finds the relevant parts of the CVs (or plans several searches for a complex question) and streams an answer in your language, with `[file, p.N]` citations |
 | 4. Check | Open **Sources** or **Details** under an answer | Sources: which CVs, and which excerpts, the answer used. Details: how the question was routed, what was searched, and where the time went |
@@ -75,11 +75,11 @@ flowchart LR
 3. **Split by section.** The CV is cut at its headings (the ones Docling found, plus short ALL-CAPS lines). Each section becomes one chunk and starts with its heading. Only a section longer than `CHUNK_SIZE` (1500 characters) is split further, with 20% overlap, preferring line breaks. Text before the first heading goes under "Other".
 4. **Read the CV's details (a generic NER, no rules).** A generic named-entity model, [GLiNER](https://github.com/urchade/GLiNER) (medium, Apache-2.0, 1.5 GB, downloaded the first time), reads the first page of the CV and is asked, one label at a time, for the candidate's **name** ("person name"), **job title**, **email address**, **phone number** and **location** ("city, country"). It keeps the highest-scoring answer for each. There are no patterns, no word lists and **no fallback**: if the model cannot be loaded, reading the CV fails with a clear message. It runs on your computer (on the GPU if there is one) and costs no Azure call, but it is slow on CPU, about 8 seconds per CV. **Years of experience are not read:** a generic NER only finds words that are written in the text, and years of experience is worked out from which dates are jobs, which it cannot tell from a degree's dates. Measured on 8 real CVs it found a name, title, email and phone for all 8 and a location for 6, but some answers are wrong, so check the **Candidates** view after uploading. Asking for all five labels in one go found far less than asking one at a time, and reading the second page only added wrong answers.
 5. **Label each chunk.** The heading is kept as `section` (as written in the CV) and also mapped to a standard `section_type`: experience, education, skills, projects, summary, certifications, languages, contact or other. The page number is stored too.
-6. **Embed each chunk.** An embedding is a list of numbers that captures the meaning of a text. Each chunk is sent to Azure OpenAI together with its file name and the candidate's name and title, so even a chunk from page 3 still points to the right CV. Requests go out in batches of 16, and a shared limit of 2 requests in flight keeps parallel CVs from hitting rate limits.
+6. **Embed each chunk.** An embedding is a list of numbers that captures the meaning of a text. Each chunk is sent to Azure OpenAI together with its file name and the candidate's name and title, so even a chunk from page 3 still points to the right CV. The batch size and the number of requests in flight are learned while running: a rate-limit answer (429) halves the number of requests in flight and a run of successes raises it again, and a batch the service says is too large is halved and remembered.
 7. **Save to Azure AI Search.** The new chunks are uploaded first, then chunks the new version no longer has are deleted, so a CV is never missing from the index.
 8. **Save the original** to Azure Blob Storage, then clear the answer cache (see [Caching](#caching)).
 
-Several CVs are processed in parallel (4 at a time) by a background queue, and the Library shows each file's state live (the sidebar shows a progress bar on every page while it runs). Docling runs one conversion at a time (its models are not thread-safe), but other CVs can embed and upload while one is being read. One CV failing, for example a scanned PDF with no text, never stops the others.
+Several CVs are processed in parallel (as many at a time as the computer has cores, between 2 and 8) by a background queue, and the Library shows each file's state live (the sidebar shows a progress bar on every page while it runs). Docling runs one conversion at a time (its models are not thread-safe), but other CVs can embed and upload while one is being read. One CV failing, for example a scanned PDF with no text, never stops the others.
 
 ### 2. Answering a question (every time you ask)
 
@@ -104,10 +104,10 @@ flowchart TD
    - *keyword search* finds exact words, such as a skill, tool or name (English stemming: "built" also finds "building"),
    - *vector search* finds chunks with a similar meaning, even if the words differ ("cloud" finds "Azure").
 
-   A scoring profile makes a keyword match in the candidate name or job title count more than the same words in the body text, and favours the *experience* and *skills* sections. When sections were picked, only those sections are searched. If fewer than 3 chunks match (some CVs use unusual headings), it searches everything instead.
+   A scoring profile makes a keyword match in the candidate name or job title count more than the same words in the body text, and favours the *experience* and *skills* sections. When sections were picked, the focused search and a search of everything run at the same time and their results are merged, so a CV with unusual headings is still found.
 5. **Semantic re-ranking.** Azure's semantic ranker reads the question and each of the top 50 candidates and gives each a relevance score, then re-orders them by how well they answer it. It also returns the most relevant passage of each chunk, which the Sources list shows.
-6. **Keep what is relevant (top-p).** The search returns up to 50 chunks with the ranker's relevance score. They are grouped by CV, and a CV counts as relevant as its best chunk. Instead of a fixed number, the best CVs are kept until they hold 80% of the relevance (`TOP_P`), then the same is done for the excerpts inside each kept CV. Each score's share is its softmax, so a clear winner takes most of it and a close field shares it. A question about one person therefore sends one or two CVs, and a broad question such as "who knows Python?" sends many. `MAX_CVS` and `MAX_CHUNKS_PER_CV` only cap the extreme case where every score is the same. A CV's excerpts stay together, in reading order, with the best CV first.
-7. **Ask the chat model.** It receives the excerpts (each labelled with CV, section and page, and the first one of every CV with a line about the candidate: name, title, contact), the question and the last few chat messages. It is told to answer only from the excerpts, to cite `[file name, p.N]`, to answer in the language of the question, and to say so when the answer is not there. The answer streams into the chat as it is written.
+6. **Keep what is relevant (top-p).** The search returns up to 50 chunks with the ranker's relevance score. They are grouped by CV, and a CV counts as relevant as its best chunk. Instead of a fixed number, the best CVs are kept until they hold 80% of the relevance (`TOP_P`), then the same is done for the excerpts inside each kept CV. Each score's share is its softmax, and the softmax's sharpness is **taken from how spread out this search's scores are**, so a clear winner among weak results takes most of the share and a close field shares it. There are no counts of CVs or excerpts: excerpts are added, most relevant first, until the text budget (`CONTEXT_CHARS`) is used. A CV's excerpts stay together, in reading order, with the best CV first.
+7. **Ask the chat model.** It receives the excerpts (each labelled with CV, section and page, and the first one of every CV with a line about the candidate: name, title, contact), the question and as many of the latest chat messages as fit in `HISTORY_CHARS`. It is told to answer only from the excerpts, to cite `[file name, p.N]`, to answer in the language of the question, and to say so when the answer is not there. The answer streams into the chat as it is written.
 8. **Complex questions go to the agent** instead of steps 2 to 7. It can list all CVs with their name and title, search (optionally limited to some CVs or filtered by job title) and read a whole CV. Its steps appear in the status box while it works.
 9. **Show the sources and the details:** the CVs the answer came from, and a **Details** dropdown with the route, timeline, searches and excerpts used.
 
@@ -253,15 +253,15 @@ The browser opens automatically. Each user's search index and Blob container are
 
 ## Using the app
 
-1. **Upload.** Open the **Library** (top bar) and drop CVs (PDF or DOCX) into the upload box. **Process CVs** stays disabled until the knowledge base would hold at least 8 CVs (the ones already indexed plus the new files), and the chat stays disabled while there are fewer than 8.
-2. **Process.** Click **Process CVs**. The files are processed in the background, 4 at a time, and a live status list in the Library refreshes every 2 seconds. Each file shows *waiting*, then the stage it is in (*reading layout*, *reading name, title and experience*, *embedding*, *saving*), then a green check with its chunk count, a grey check if it was already indexed and unchanged, or a red mark and the reason if it failed. A progress bar and a line such as "4 running in parallel · 3 waiting" show the whole batch. You can switch to the chat or the Candidates view meanwhile: the sidebar keeps a small progress bar, and when the last file finishes the CV list updates by itself and a message tells you. **Clear status** removes the finished entries.
+1. **Upload.** Open the **Library** (top bar) and drop CVs (PDF or DOCX) into the upload box. **Process CVs** is enabled as soon as you have chosen files, and you can chat as soon as one CV is indexed.
+2. **Process.** Click **Process CVs**. The files are processed in the background, several at a time (as many as the computer has cores, between 2 and 8), and a live status list in the Library refreshes every 2 seconds. Each file shows *waiting*, then the stage it is in (*reading layout*, *reading name, title and experience*, *embedding*, *saving*), then a green check with its chunk count, a grey check if it was already indexed and unchanged, or a red mark and the reason if it failed. A progress bar and a line such as "4 running in parallel · 3 waiting" show the whole batch. You can switch to the chat or the Candidates view meanwhile: the sidebar keeps a small progress bar, and when the last file finishes the CV list updates by itself and a message tells you. **Clear status** removes the finished entries.
 3. **Ask.** Type a question in any language, or click one of the suggested questions on the welcome screen. The answer streams in as it is written, in the language you asked in. While it works, a status box shows what is happening (the router's decision, each search, each agent step).
 4. **Check the sources.** Open **Sources** under an answer to see which CVs it used and the most relevant passage of each.
 5. **Check the details.** Switch on **Details** (its label shows the route and the total time) for tabs with: a *Timeline* of every step with its time and share of the total (router, query expansion, each search, agent rounds and tools, the model's wait for its first word, writing the answer); the *Router* result (class, standalone question, sections searched); every *Search* (query, chunks found, filters, cached or not); the *Agent* rounds and tool calls; the exact *Excerpts used*; and the *Settings* (model deployments, query expansion, answer cache). Details are kept with each message for the whole chat.
 6. **Manage a CV.** The Library lists every CV in a table (file, candidate, job title). Select a row, then:
    - **Open CV** opens the original file through a one-hour signed link,
    - **Re-index** queues the stored file for processing again (for example after the pipeline changed) and shows it in the same status list,
-   - **Delete** removes it from Blob Storage and from search, after a confirmation. If this leaves fewer than 8 CVs, the chat is disabled until you add more.
+   - **Delete** removes it from Blob Storage and from search, after a confirmation. If it was your last CV, the chat is disabled until you add one.
    **Update outdated CVs** (above the table) checks every stored CV against the current pipeline and re-indexes only those processed by an older version (the others show as skipped).
 7. **Choose what to chat with.** The **Chat with** button above the conversation picks one or more CVs to answer from. Leave it on "All CVs" to search everything. **Chat with this CV** on a Candidates card sets it for you.
 8. **Start over.** **New chat** starts a new conversation and keeps the old one in your chat list. It does not delete any CVs.
@@ -346,27 +346,17 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 |---|---|---|
 | `CHUNK_SIZE` | `1500` | Longest chunk in characters. A section shorter than this stays one chunk |
 | `CHUNK_OVERLAP` | `300` | Characters shared between pieces of a long section (20%) |
-| `DOCLING_DEVICE` | `"cpu"` | Where Docling runs. Use `"cuda"` with a GPU for much faster extraction |
-| `MIN_CVS` | `8` | CVs needed in the knowledge base before processing and chatting are enabled |
-| `MAX_WORKERS` | `4` | CVs processed at the same time. Lower it if Azure OpenAI reports rate limits |
-| `EMBED_BATCH` | `16` | Chunks per embedding request |
-| `EMBED_CONCURRENCY` | `2` | Embedding requests in flight at once, across all CVs |
 | `EXTRACT_CACHE_DIR` | `.cache/extracted` | Where Docling output is saved |
+| `CONTEXT_CHARS` | `36000` | The most CV text sent to the chat model for one question (about 9,000 tokens). Excerpts are added in order of relevance until it is used up, so this one number replaces separate limits on CVs and excerpts. The agent's tools use half of it each |
+| `HISTORY_CHARS` | `6000` | The most recent chat sent along with a question. As many of the latest messages as fit are used |
 | `RETRIEVE_K` | `50` | Chunks fetched and re-ranked per search, then grouped by candidate (50 is the semantic ranker's limit) |
 | `TOP_P` | `0.8` | Share of the relevance that the kept CVs, and the kept excerpts of each, must cover. Higher sends more, lower sends less |
-| `TOP_P_TEMPERATURE` | `0.15` | How sharply a higher score is favoured when shares are worked out. Lower lets a clear winner take more |
-| `MAX_CVS` | `10` | Most candidates sent to the chat model, however flat the scores are |
-| `MAX_CHUNKS_PER_CV` | `4` | Most excerpts of one candidate sent to the chat model |
 | `EXPANDED_QUERIES` | `2` | Alternative queries searched when **Query expansion** is on |
-| `RRF_K` | `60` | Reciprocal rank fusion constant used to merge the searches |
+| `RRF_K` | `60` | The standard constant of reciprocal rank fusion (from the original paper), used to merge the searches. Leave it |
 | `CACHE_SIZE` | `256` | Entries kept per kind of cached result (router, search, answer) |
 | `NER_MODEL` | `"urchade/gliner_medium-v2.1"` | The generic NER model that reads name, title, email, phone and location. `urchade/gliner_small-v2.1` (611 MB) is faster but much less accurate |
 | `AGENT_MAX_ROUNDS` | `5` | Tool rounds the agent may take for one complex question |
 | `AGENT_MAX_SECONDS` | `30` | Time budget for those rounds, then it answers with what it found |
-| `AGENT_SEARCH_K` | `20` | Most excerpts one agent search hands to the model (one per CV by default, so a search reaches up to 20 CVs) |
-| `AGENT_CV_CHARS` | `12000` | Most characters of one CV the `get_cv` tool hands to the model |
-| `MIN_FILTERED_RESULTS` | `3` | Fewer section-filtered hits than this and the search runs again on all sections |
-| `HISTORY_MESSAGES` | `6` | Recent chat messages used for the router and sent with each question |
 | `EMBED_CACHE_SIZE` | `256` | Query embeddings kept in memory |
 
 The search index settings (text analyzer `en.microsoft`, field weights, boosted sections) are constants at the top of [cv_chat/services/search_index.py](cv_chat/services/search_index.py). Changing them needs a new index (see Troubleshooting).
@@ -379,12 +369,12 @@ The search index settings (text analyzer `en.microsoft`, field weights, boosted 
 - **Same CV under a different file name counts as a different CV.** `cv.pdf` and `cv (1).pdf` are stored separately.
 - **After changing extraction or chunking code or settings**, click **Update outdated CVs** (in the Library), or **Process CVs** with the files again. The change is detected automatically and the CVs are re-indexed, even though the files are unchanged; CVs already up to date are skipped. (Any edit to `extract.py`, `chunking.py`, `sections.py` or `entities.py`, even a comment, counts as a change.)
 - **Using an index from an older version of the app:** delete it in the Azure portal (each user's index is named `<AZURE_SEARCH_INDEX>-<user id>`) and process the CVs again. Azure cannot change an analyzer, a field's filterable flag or the vector metric on an existing index, so the app stops at start-up with a message that names what is outdated. After recreating it, click **Update outdated CVs** to index the stored CVs again.
-- **The first CV used to be slow; now the wait is hidden.** Docling and PyTorch take many seconds to load, so they are not loaded when the app starts (the login and chat pages open without them), and they are loaded in the background the first time you open the **Library**. By the time you have picked your files they are usually ready. After that, extraction takes a few seconds per CV on CPU. A GPU (`DOCLING_DEVICE = "cuda"`) is much faster.
+- **The first CV used to be slow; now the wait is hidden.** Docling and PyTorch take many seconds to load, so they are not loaded when the app starts (the login and chat pages open without them), and they are loaded in the background the first time you open the **Library**. By the time you have picked your files they are usually ready. After that, extraction takes a few seconds per CV on CPU. A GPU is used automatically when there is one, and is much faster.
 - **Delete is permanent.** It removes the original file from Blob Storage and the CV from the index.
 - **Scanned PDFs go through OCR**, which is slower than reading a text PDF. A PDF with no readable text at all is reported as "No text found".
 - **DOCX files have no page numbers**, so their chunks are stored as page 1.
 - **Every question makes a router call** before the search, which adds a little time before the answer starts streaming. Query expansion adds one more call and two more searches. A complex question can take several model calls, often 10 to 30 seconds.
-- **Simple questions send only the relevant CVs** (top-p, at most `MAX_CVS` CVs and `MAX_CHUNKS_PER_CV` excerpts each), so a question about a large pile of CVs may not cover every one. That is what the agent is for.
+- **Simple questions send only the relevant CVs** (top-p, within the `CONTEXT_CHARS` text budget), so a question about a large pile of CVs may not cover every one. That is what the agent is for.
 - **The search is built for English CVs.** The keyword analyzer is English, and the router writes the search query in English. Questions can be in any language, but CVs in another language would need another analyzer and a new index.
 - **Years of experience are not read.** A generic NER cannot work them out (see step 4 above), so the app does not show or filter by them. If you need them, they would have to come from a model that reads the whole CV.
 - **Contact details are personal data.** Email, phone and location are stored as fields in the search index, next to the CV text. Anyone with the search key can read them.
@@ -415,7 +405,7 @@ The reasoning, limits and costs behind each part of the chat side.
 
 - Questions the router marks *complex* go to a capped tool-using agent with three tools:
   - `list_cvs` returns every CV with its candidate name and job title,
-  - `search_cvs` searches, optionally limited to some CVs, filtered by `job_title`, with `per_cv` to see more of each CV (one excerpt per CV by default, up to 20 per search, so one search reaches many CVs),
+  - `search_cvs` searches, optionally limited to some CVs, filtered by `job_title`, with `per_cv` to see more of each CV (one excerpt per CV by default, within a text budget, so one search reaches many CVs),
   - `get_cv` reads a whole CV.
 - It plans its searches, retries with different wording and answers only from what the tools returned. Its steps are shown while it works, and its answer streams.
 - Limits: at most 5 rounds and about 30 seconds. When the budget is used up it answers from what it has found. If the agent fails it falls back to a single search.
@@ -475,11 +465,11 @@ Most problems now show a message that says what to check. These are the ones you
 | `The index '...' stores vectors of length N` | The index was created with another embedding model. Delete the index in the Azure portal, then process the CVs again |
 | `Could not prepare the search index: ... older version` | See the row above: delete the index (or use a new name), restart, and click **Update outdated CVs** |
 | A note says excerpts from a CV *were left out because Azure's content safety filter flagged them* | Azure's jailbreak detection saw something that looks like an instruction in that CV's text. The answer used the other excerpts. Check the CV; the app keeps working |
-| `Could not answer: ...` under a question | The model call failed (a wrong deployment name, a rate limit, a network error). The message says why. Try again, or lower `MAX_WORKERS` if it happens during an upload |
+| `Could not answer: ...` under a question | The model call failed (a wrong deployment name, a rate limit, a network error). The message says why. Try again |
 | `No text found (scanned PDF?)` | OCR ran and still found nothing: the file is blank or the image is unreadable. Try a clearer copy |
 | `Could not list the CVs` in the Library | The storage connection string or container name is wrong, or the storage account is not reachable |
-| **Process CVs** is greyed out | By design: no files are selected, or the indexed plus new CVs are still fewer than 8. The Library says how many more are needed |
-| The chat input is disabled | By design: fewer than 8 CVs are in Azure |
+| **Process CVs** is greyed out | No files are chosen yet |
+| The chat input is disabled | By design: there are no CVs yet. Add some in the Library |
 
 If the search service has no semantic ranker (Free tier, or it is switched off), the app does not fail: it logs a warning and answers with plain hybrid search. Answers are less precisely ranked and Sources show the start of each chunk instead of the best passage.
 

@@ -42,25 +42,15 @@ if _missing:
 # Tunables
 CHUNK_SIZE = 1500  # max characters per chunk; a section shorter than this stays one chunk
 CHUNK_OVERLAP = CHUNK_SIZE // 5  # 20% overlap, used only when a long section is split
-DOCLING_DEVICE = "cpu"  # "cuda" if a GPU is available
-MIN_CVS = 8  # CVs needed in the knowledge base before processing and chatting are enabled
-MAX_WORKERS = 4  # CVs processed in parallel
+CONTEXT_CHARS = 36000  # the most CV text sent to the chat model for one question (about 9,000 tokens); excerpts are added by relevance until it is used
+HISTORY_CHARS = 6000  # the most recent chat sent along with a question
 RETRIEVE_K = 50  # chunks fetched and re-ranked per search, then grouped by candidate (50 is the semantic ranker's limit)
 TOP_P = 0.8  # keep the most relevant candidates, and the most relevant excerpts of each, until they hold this share of the relevance
-TOP_P_TEMPERATURE = 0.15  # how sharply a higher relevance score is favoured when shares are worked out: lower = a clear winner takes more
-MAX_CVS = 10  # most candidates sent to the chat model, however flat the scores are
-MAX_CHUNKS_PER_CV = 4  # most excerpts of one candidate sent to the chat model
 EXPANDED_QUERIES = 2  # alternative queries searched next to the main one when query expansion is on
 RRF_K = 60  # reciprocal rank fusion constant: higher flattens the difference between ranks
-MIN_FILTERED_RESULTS = 3  # fewer section-filtered hits than this -> search again without the filter
-HISTORY_MESSAGES = 6  # recent chat messages sent along with each question
-EMBED_BATCH = 16  # chunks per embedding request
-EMBED_CONCURRENCY = 2  # embedding requests in flight at once, across all parallel CVs
 EXTRACT_CACHE_DIR = ".cache/extracted"  # Docling output per file, so re-chunking skips the slow step
 CACHE_SIZE = 256  # entries kept per kind of cached result (router, search, answer)
 EMBED_CACHE_SIZE = 256  # question embeddings kept in memory
 AGENT_MAX_ROUNDS = 5  # tool-using rounds the agent may take for one complex question
 AGENT_MAX_SECONDS = 30  # time budget for those rounds; afterwards it answers from what it has found
-AGENT_CV_CHARS = 12000  # most characters of one CV that get_cv hands to the model
-AGENT_SEARCH_K = 20  # most excerpts one search_cvs call hands to the model
 NER_MODEL = "urchade/gliner_medium-v2.1"  # the generic NER model (GLiNER medium, Apache-2.0, 1.5 GB) that reads name, title, email, phone and location

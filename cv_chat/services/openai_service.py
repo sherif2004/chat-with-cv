@@ -1,9 +1,12 @@
 """Azure OpenAI: embeddings for CV chunks and questions, and chat answers."""
+import logging
+import os
 import threading
+import time
 from collections.abc import Callable, Iterator
 from functools import lru_cache
 
-from openai import AzureOpenAI, BadRequestError, NotFoundError
+from openai import APIConnectionError, APITimeoutError, AzureOpenAI, BadRequestError, InternalServerError, NotFoundError, RateLimitError
 
 from cv_chat import config
 
@@ -13,7 +16,44 @@ _client = AzureOpenAI(
     api_version=config.OPENAI_API_VERSION,
     max_retries=5,  # the SDK backs off on 429s, which parallel ingestion can trigger
 )
-_embed_gate = threading.Semaphore(config.EMBED_CONCURRENCY)  # shared by every parallel CV
+log = logging.getLogger(__name__)
+
+
+class AdaptiveLimit:
+    """How many requests may be in flight at once. It starts at `start`, halves when Azure answers "too many requests", and
+    grows by one after a run of requests that went through, up to `maximum`: it settles on what the deployment allows."""
+
+    def __init__(self, start: int, maximum: int, grow_after: int = 10):
+        self._condition = threading.Condition()
+        self.limit, self.maximum, self._grow_after = start, maximum, grow_after
+        self._active = self._ok = 0
+
+    def __enter__(self) -> "AdaptiveLimit":
+        with self._condition:
+            while self._active >= self.limit:
+                self._condition.wait()
+            self._active += 1
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.done()
+
+    def done(self, rate_limited: bool = False) -> None:
+        with self._condition:
+            self._active -= 1
+            if rate_limited:
+                self.limit, self._ok = max(1, self.limit // 2), 0
+            else:
+                self._ok += 1
+                if self._ok >= self._grow_after and self.limit < self.maximum:
+                    self.limit, self._ok = self.limit + 1, 0
+            self._condition.notify_all()
+
+
+_CPUS = os.cpu_count() or 2
+_embed_gate = AdaptiveLimit(start=min(4, _CPUS), maximum=max(2, min(8, _CPUS)))  # shared by every parallel CV
+_embed_batch = 64  # texts per request: learned downwards if Azure refuses (some deployments take only 16)
+_embed_lock = threading.Lock()
 
 
 class ContentFilterError(RuntimeError):
@@ -42,17 +82,70 @@ def embedding_dimensions() -> int:
     return len(embed(["dimension probe"])[0])
 
 
-def embed(texts: list[str]) -> list[list[float]]:
-    """Embed in batches; the shared gate keeps parallel CVs from flooding the endpoint with requests."""
-    vectors: list[list[float]] = []
-    for start in range(0, len(texts), config.EMBED_BATCH):
-        with _embed_gate:
-            batch = texts[start : start + config.EMBED_BATCH]
-            response = _explain_404(
+def _wait_seconds(error: RateLimitError, attempt: int) -> float:
+    """How long Azure asks us to wait, or an exponential back-off when it does not say."""
+    headers = getattr(getattr(error, "response", None), "headers", None) or {}
+    try:
+        if "retry-after-ms" in headers:
+            return min(float(headers["retry-after-ms"]) / 1000, 60)
+        if "retry-after" in headers:
+            return min(float(headers["retry-after"]), 60)
+    except ValueError:
+        pass
+    return min(2.0 ** attempt, 30)
+
+
+def _looks_like_a_size_error(error: BadRequestError) -> bool:
+    text = str(error).lower()
+    return getattr(error, "code", None) != "content_filter" and any(w in text for w in ("too many", "maximum", "exceed", "array", "limit"))
+
+
+def _embed_request(batch: list[str]):
+    """One embeddings call. When Azure says "too many requests" it waits as long as Azure asks, lowers how many calls run at
+    once for everyone, and tries again; connection and server errors are retried a few times."""
+    attempt = 0
+    while True:
+        _embed_gate.__enter__()
+        rate_limited = False
+        try:
+            return _explain_404(
                 config.EMBEDDING_DEPLOYMENT,
-                lambda: _client.embeddings.create(model=config.EMBEDDING_DEPLOYMENT, input=batch),
+                lambda: _client.with_options(max_retries=0).embeddings.create(model=config.EMBEDDING_DEPLOYMENT, input=batch),
             )
+        except RateLimitError as error:
+            rate_limited, wait = True, _wait_seconds(error, attempt)
+            if attempt >= 8:
+                raise
+        except (APIConnectionError, APITimeoutError, InternalServerError):
+            wait = min(2.0 ** attempt, 10)
+            if attempt >= 4:
+                raise
+        finally:
+            _embed_gate.done(rate_limited)
+        attempt += 1
+        log.info("embeddings call retried in %.1fs (attempt %d, %d calls allowed at once)", wait, attempt, _embed_gate.limit)
+        time.sleep(wait)
+
+
+def embed(texts: list[str]) -> list[list[float]]:
+    """Embed in batches. The batch size is learned (it drops if Azure refuses it) and how many calls run at once adapts to
+    Azure's rate limit, so no hand-set numbers are needed."""
+    global _embed_batch
+    vectors: list[list[float]] = []
+    start = 0
+    while start < len(texts):
+        size = _embed_batch
+        try:
+            response = _embed_request(texts[start : start + size])
+        except BadRequestError as error:
+            if size > 1 and _looks_like_a_size_error(error):
+                with _embed_lock:
+                    _embed_batch = max(1, min(_embed_batch, size) // 2)
+                log.info("embeddings batch size lowered to %d", _embed_batch)
+                continue
+            raise
         vectors.extend(item.embedding for item in response.data)
+        start += size
     return vectors
 
 

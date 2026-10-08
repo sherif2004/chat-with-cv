@@ -4,7 +4,6 @@ import time
 import pandas as pd
 import streamlit as st
 
-from cv_chat import config
 from cv_chat.processing import extract
 from cv_chat.rag import ingest, jobs
 from cv_chat.services import blob_storage
@@ -36,16 +35,11 @@ def cv_names(ws: Workspace) -> list[str]:
 def render(ws: Workspace, cvs: list[str]) -> None:
     extract.warm_up_in_background()  # people who open the Library are about to process CVs: load the models meanwhile
     st.markdown("#### Library")
-    st.caption(f"{len(cvs)} CV{'' if len(cvs) == 1 else 's'} indexed · at least {config.MIN_CVS} are needed to chat")
+    st.caption(f"{len(cvs)} CV{'' if len(cvs) == 1 else 's'} indexed")
 
     with st.container(border=True):
         files = st.file_uploader("CV files (PDF or DOCX)", type=["pdf", "docx"], accept_multiple_files=True, key="library_files")
-        new_names = {f.name for f in files} - set(cvs)  # uploading an indexed file again adds nothing
-        total = len(cvs) + len(new_names)
-        enough = total >= config.MIN_CVS
-        if files and not enough:
-            st.warning(f"{total} of {config.MIN_CVS} CVs. Add {config.MIN_CVS - total} more to continue.", icon=":material/info:")
-        st.button("Process CVs", icon=":material/bolt:", type="primary", disabled=not files or not enough, on_click=_start, args=(ws,))
+        st.button("Process CVs", icon=":material/bolt:", type="primary", disabled=not files, on_click=_start, args=(ws,))
     progress(ws)
 
     if not cvs:

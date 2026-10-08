@@ -110,7 +110,14 @@ def _route(cache: Cache, question: str, history: list[dict], trace: Trace | None
 
 def _recent(history: list[dict]) -> list[dict]:
     """Recent turns let follow-up questions refer back to earlier answers."""
-    return [{"role": m["role"], "content": m["content"]} for m in history[-config.HISTORY_MESSAGES :]]
+    chosen, used = [], 0
+    for message in reversed(history):  # newest first, as many as fit the budget; the latest message always goes in
+        text = message["content"] if chosen else message["content"][-config.HISTORY_CHARS :]
+        if chosen and used + len(text) > config.HISTORY_CHARS:
+            break
+        chosen.append({"role": message["role"], "content": text})
+        used += len(text)
+    return chosen[::-1]
 
 
 def _expand(query: str, trace: Trace | None = None) -> list[str]:
