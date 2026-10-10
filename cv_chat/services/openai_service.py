@@ -149,13 +149,33 @@ def embed(texts: list[str]) -> list[list[float]]:
     return vectors
 
 
-def chat(messages: list[dict], json_mode: bool = False) -> str:
+def chat(messages: list[dict], json_mode: bool = False, deployment: str | None = None) -> str:
+    deployment = deployment or config.CHAT_DEPLOYMENT
     kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
     response = _explain_404(
-        config.CHAT_DEPLOYMENT,
-        lambda: _client.chat.completions.create(model=config.CHAT_DEPLOYMENT, messages=messages, **kwargs),
+        deployment,
+        lambda: _client.chat.completions.create(model=deployment, messages=messages, **kwargs),
     )
     return response.choices[0].message.content or ""
+
+
+def suggest_title(question: str, answer: str) -> str | None:
+    """A short name for a new chat, written by the small model. None if no small model is set or it fails: the caller keeps the question."""
+    if not config.TITLE_DEPLOYMENT:
+        return None
+    try:
+        title = chat(
+            [
+                {"role": "system", "content": "Name this chat in 2 to 6 words, in the language of the question. Reply with the name only: no quotes, no full stop."},
+                {"role": "user", "content": f"Question: {question[:500]}\n\nAnswer: {answer[:600]}"},
+            ],
+            deployment=config.TITLE_DEPLOYMENT,
+        )
+    except Exception as error:  # a chat name is a nicety: never lose the answer over it
+        log.warning("naming the chat with the small model failed: %s", str(error).splitlines()[0][:150])
+        return None
+    title = " ".join(title.replace('"', " ").split()).strip(" .")
+    return title or None
 
 
 def chat_with_tools(messages: list[dict], tools: list[dict], timeout: float | None = None) -> tuple[str, object]:

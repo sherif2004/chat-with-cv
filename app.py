@@ -1,7 +1,7 @@
 """Chat with CVs: Streamlit entry point. Run with `streamlit run app.py`."""
 import streamlit as st
 
-st.set_page_config(page_title="CV Chat", page_icon=":material/description:", layout="wide")
+st.set_page_config(page_title="CV Lens · Chat with your CVs", page_icon="cv_chat/ui/assets/icon.png", layout="wide")
 
 from cv_chat.ui import accounts, profile, states, style  # none of these needs the Azure settings, so the error screens below always work
 

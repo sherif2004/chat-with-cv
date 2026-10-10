@@ -3,8 +3,8 @@ import streamlit as st
 
 from cv_chat import history
 from cv_chat.rag import qa
-from cv_chat.services import blob_storage
-from cv_chat.ui import candidates, chats, details, safe, states, suggestions
+from cv_chat.services import blob_storage, openai_service
+from cv_chat.ui import candidates, chats, details, safe, states, style, suggestions
 from cv_chat.workspace import Workspace
 
 ROUTE_NOTES = {
@@ -75,12 +75,12 @@ def _header(ws: Workspace) -> None:
 
 
 def _welcome(ws: Workspace, cvs: list[str], has_cvs: bool) -> None:
+    style.logo()
     st.html(
         '<div class="cv-hero">'
-        '<span class="cv-hero-eyebrow">Azure AI Search · Azure OpenAI</span>'
         '<div class="cv-hero-title">Chat with CVs</div>'
         '<p class="cv-hero-subtitle">Ask anything about your candidates. '
-        "Every answer comes from the uploaded CVs, with its sources.</p>"
+        "Pick a question below or type your own. Every answer comes from your uploaded CVs, and shows where it came from.</p>"
         "</div>"
     )
     _checklist(ws, len(cvs))
@@ -222,7 +222,9 @@ def _save(ws: Workspace, question: str, exchange: list[dict]) -> bool:
     """Keep the chat in Postgres. A failure here must not lose the answer the user is reading. True if it was saved."""
     try:
         if not st.session_state.get("conversation_id"):
-            st.session_state.conversation_id = history.create_conversation(ws.user_id, question)
+            answer = next((m["content"] for m in exchange if m["role"] == "assistant"), "")
+            title = openai_service.suggest_title(question, answer) or question  # the small model names it; the question is the fallback
+            st.session_state.conversation_id = history.create_conversation(ws.user_id, title)
         return history.add_messages(ws.user_id, st.session_state.conversation_id, exchange)
     except Exception as error:
         st.warning(f"This answer could not be saved to your chat history: {str(error).splitlines()[0][:150]}", icon=":material/warning:")

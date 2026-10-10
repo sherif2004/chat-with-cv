@@ -8,6 +8,7 @@ import json
 import streamlit as st
 
 from cv_chat import auth, db
+from cv_chat.ui import style
 
 COOKIE = "cv_session"
 
@@ -95,6 +96,7 @@ def _login_screen() -> tuple[str | None, str | None]:
     """The login, sign-up and forgot-password forms. Returns (session token, new recovery code or None) once someone is in."""
     _, middle, _ = st.columns([1, 2, 1])
     with middle:
+        style.logo()
         st.html('<div class="cv-brand"><div class="cv-brand-name">CV Chat</div><div class="cv-brand-tag">Ask questions about your candidates</div></div>')
         with st.container(border=True):
             login_tab, signup_tab, forgot_tab = st.tabs(["Log in", "Sign up", "Forgot password"])

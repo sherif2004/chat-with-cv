@@ -35,6 +35,8 @@ OPENAI_API_KEY = _env("AZURE_OPENAI_API_KEY")
 OPENAI_API_VERSION = _env("AZURE_OPENAI_API_VERSION")
 EMBEDDING_DEPLOYMENT = _env("AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
 CHAT_DEPLOYMENT = _env("AZURE_OPENAI_CHAT_DEPLOYMENT")
+# Optional: a smaller, cheaper deployment for small jobs such as naming a chat. Without it a chat is named after its first question.
+TITLE_DEPLOYMENT = os.environ.get("AZURE_OPENAI_SMALL_DEPLOYMENT", "").strip()
 
 if _missing:
     raise KeyError(", ".join(_missing))
