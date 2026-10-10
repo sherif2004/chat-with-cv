@@ -35,7 +35,7 @@ CHAT_PROMPT = """You are the assistant of a "chat with CVs" app. The user's mess
 Do not state any fact about a candidate. If they ask what you can do, say you answer questions about the uploaded CVs."""
 
 ROUTER_PROMPT = f"""You prepare a message for a chat over a set of candidate CVs.
-Given the chat so far and the latest message, reply with JSON: {{"route": "...", "query": "...", "sections": [...], "role": "...", "ask": "..."}}.
+Given the chat so far and the latest message, reply with JSON: {{"route": "...", "query": "...", "sections": [...], "role": "...", "everyone": false, "ask": "..."}}.
 - "route": one of
   "chat"    - a greeting, thanks, or anything that needs no CV search;
   "simple"  - a question that one search over the CVs can answer;
@@ -50,6 +50,9 @@ Given the chat so far and the latest message, reply with JSON: {{"route": "...",
   Use [] when the question is about the whole CV or you are unsure.
 - "role": the job title the user wants candidates for, only when the message asks to find or filter candidates by one specific
   job role (for example "find a data engineer"), written in English. "" for a skill, a person's name, or no role.
+- "everyone": true when the message wants every candidate (or all of the selected ones) compared, ranked or listed on the same
+  point (for example "compare their Python skills", "who has the most experience?", "list everyone's education"); false for a
+  question about one person or one specific skill or fact.
 - "ask": for "clarify" only, one short question that gets the missing detail, in the language of the message. "" otherwise."""
 
 EXPAND_PROMPT = f"""You help search a set of candidate CVs. Given a search query, reply with JSON: {{"queries": ["...", "..."]}}
@@ -74,6 +77,7 @@ class Route:
     query: str  # the message rewritten to stand alone
     sections: list[str]
     role: str = ""  # a specific job role the user asked for, if any
+    everyone: bool = False  # the question compares, ranks or lists all the candidates: answer from a fixed number of them (top-k)
     ask: str = ""  # the question to put to the user, for the "clarify" kind
 
 
@@ -108,7 +112,8 @@ def _route(cache: Cache, question: str, history: list[dict], trace: Trace | None
         ask = " ".join(str(data.get("ask") or "").split())[:300]
         if kind == "clarify" and not ask:
             kind = "simple"  # nothing to ask: answer with the best reading
-        route = Route(kind, query, sections, role, ask if kind == "clarify" else "")
+        everyone = data.get("everyone") is True and kind in ("simple", "complex")
+        route = Route(kind, query, sections, role, everyone, ask if kind == "clarify" else "")
     except Exception:  # routing only improves the search, so a failure must never block the answer
         return done(Route("simple", question, []), cached=False, failed=True)  # not cached: the next try may work
     cache.put(ROUTE, key, route, token)
@@ -289,19 +294,21 @@ def _answer(
             if not have:
                 return Answer(iter([roles.missing_message(route.role, titles)]), [], "role_missing")
             scope = have
-    if route.kind == "complex":  # needs more than the best chunks: let the agent plan its own searches
-        on_step("Complex question: planning the searches")
-        try:
-            return Answer(*agent.run(ws, route.query, _recent(history), on_step, trace, original=question, scope=scope), "complex")
-        except Exception as error:  # fall back to the plain flow rather than lose the answer
-            log.warning("agent failed, using a single search: %s", error)
-            trace.add("agent_model", "agent failed", 0, error=str(error).splitlines()[0] if str(error) else type(error).__name__)
-    if expand:
-        on_step("Rewording the question for a wider search")
-    queries = [route.query, *(_expand(route.query, trace) if expand else [])]
-    on_step(f"Searching the CVs with {len(queries)} quer{'y' if len(queries) == 1 else 'ies'}")
-    file_ids = [ingest.file_id_for(name) for name in scope] or None
-    sources = retrieval.retrieve(ws, queries, route.sections, trace, file_ids)
+    sources = _everyone(ws, route, expand, scope, on_step, trace) if route.everyone else None
+    if sources is None:
+        if route.kind == "complex":  # needs more than the best chunks: let the agent plan its own searches
+            on_step("Complex question: planning the searches")
+            try:
+                return Answer(*agent.run(ws, route.query, _recent(history), on_step, trace, original=question, scope=scope), "complex")
+            except Exception as error:  # fall back to the plain flow rather than lose the answer
+                log.warning("agent failed, using a single search: %s", error)
+                trace.add("agent_model", "agent failed", 0, error=str(error).splitlines()[0] if str(error) else type(error).__name__)
+        if expand:
+            on_step("Rewording the question for a wider search")
+        queries = [route.query, *(_expand(route.query, trace) if expand else [])]
+        on_step(f"Searching the CVs with {len(queries)} quer{'y' if len(queries) == 1 else 'ies'}")
+        file_ids = [ingest.file_id_for(name) for name in scope] or None
+        sources = retrieval.retrieve(ws, queries, route.sections, trace, file_ids)
     recent = _recent(history)
 
     def messages_for(chosen: list[dict]) -> list[dict]:
@@ -313,3 +320,19 @@ def _answer(
         ]
 
     return Answer(_guarded(sources, messages_for, trace), sources, "simple")
+
+
+def _everyone(ws: Workspace, route: Route, expand: bool, scope: list[str], on_step: Callable[[str], None], trace: Trace) -> list[dict] | None:
+    """Excerpts for a question about everyone: a fixed number of candidates (top-k) instead of top-p, found in one search plus
+    a search for the CVs it missed. None when that is not possible (no CVs, or a failure), so the normal flow answers instead."""
+    try:
+        names = [name for name in ingest.list_cvs(ws) if not scope or name in scope]
+        if not names:
+            return None
+        on_step(f"Question about everyone: reading up to {min(config.TOP_K, len(names))} of {len(names)} CVs")
+        queries = [route.query, *(_expand(route.query, trace) if expand else [])]
+        sources = retrieval.retrieve_top_k(ws, queries, route.sections, {name: ingest.file_id_for(name) for name in names}, trace)
+        return sources or None
+    except Exception as error:  # this only widens the coverage, so a failure must never block the answer
+        log.warning("top-k retrieval failed, using the normal flow: %s", error)
+        return None

@@ -14,6 +14,7 @@ ROUTE_NOTES = {
     "simple": "Simple question · one search",
     "complex": "Complex question · answered by the search agent",
 }
+USER_NOTES = ("chat", "clarify", "role_missing")  # route notes that say something a user needs; the rest are technical
 AVATARS = {"user": ":material/person:", "assistant": ":material/auto_awesome:"}
 
 
@@ -46,12 +47,20 @@ def _scope(cvs: list[str]) -> None:
         st.session_state.chat_scope = [name for name in st.session_state.get("scope_saved", []) if name in cvs]
     st.session_state.chat_scope = [name for name in st.session_state.chat_scope if name in cvs]  # drop deleted CVs
     chosen = st.session_state.chat_scope
-    label = "All CVs" if not chosen else (safe.esc(chosen[0]) if len(chosen) == 1 else f"{len(chosen)} CVs")
-    with st.popover(f"Chat with: {label}", icon=":material/filter_list:"):
-        st.multiselect(
-            "Chat with", cvs, key="chat_scope", placeholder="All CVs", label_visibility="collapsed",
-            help="Pick one or more CVs to answer only from them. Leave empty to search all CVs.",
-        )
+    with st.container(horizontal=True, vertical_alignment="center", gap="small"):  # always visible: it decides which CVs answer
+        st.caption("Answering from")
+        if chosen:
+            for name in chosen[:3]:
+                st.badge(safe.esc(name), icon=":material/description:", color="blue")
+            if len(chosen) > 3:
+                st.badge(f"+{len(chosen) - 3} more", color="gray")
+        else:
+            st.badge(f"All {len(cvs)} CV{'' if len(cvs) == 1 else 's'}", icon=":material/select_all:", color="green")
+        with st.popover("Change", icon=":material/tune:", width="content"):
+            st.multiselect(
+                "Chat with", cvs, key="chat_scope", placeholder="All CVs", label_visibility="collapsed",
+                help="Pick one or more CVs to answer only from them. Leave empty to search all CVs.",
+            )
     st.session_state.scope_saved = list(st.session_state.chat_scope)
 
 
@@ -136,9 +145,9 @@ def _show(ws: Workspace, message: dict, index: int | None = None, last: bool = F
         if message.get("sources"):
             _chips(ws, message["sources"])
         _actions(ws, message, index, last)
-        if message.get("trace"):
+        if message.get("trace") and st.session_state.get("show_details"):  # technical details are opt-in (account menu)
             _details(f"details_{st.session_state.get('conversation_id')}_{index}", message["trace"], message.get("sources", []))
-        else:
+        elif message.get("route") in USER_NOTES or not message.get("trace"):
             _route_note(message.get("route"))
         _sources(ws, message.get("sources", []))
 

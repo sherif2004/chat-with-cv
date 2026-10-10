@@ -116,39 +116,37 @@ def _start(ws: Workspace) -> None:
 
 
 def _table(ws: Workspace, cvs: list[str]) -> None:
-    """Every CV in a table; picking a row shows what can be done with that CV."""
+    """Every CV in one table. Open is a link on each row; select rows to re-index or delete them."""
     rows = candidates.candidate_list(ws, cvs)
     frame = pd.DataFrame({
         "File": [r["file_name"] for r in rows],
         "Candidate": [r["name"] for r in rows],
         "Job title": [r["title"] for r in rows],
+        "Location": [r["location"] for r in rows],
+        "CV": [_link(ws, r["file_name"]) for r in rows],
     })
-    top_left, top_right = st.columns([3, 2], vertical_alignment="center")
-    top_left.caption("Select a CV to open, re-index or delete it.")
-    top_right.button(
-        "Update outdated CVs", icon=":material/published_with_changes:", width="stretch", on_click=_update_all, args=(ws, cvs),
-        help="Check every CV against the current pipeline and re-index only those processed by an older version. "
-        "The status panel shows the unchanged ones as skipped.",
-    )
+    key = f"library_table_{st.session_state.get('library_reset', 0)}"
+    bar = st.container()  # drawn above the table, filled once the table says what is selected
     event = st.dataframe(
-        frame, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row", key="library_table",
+        frame, hide_index=True, width="stretch", on_select="rerun", selection_mode="multi-row", key=key,
+        column_config={"CV": st.column_config.LinkColumn("CV", display_text="Open", help="Open the original file")},
     )
-    chosen = event.selection.rows
-    if not chosen or chosen[0] >= len(rows):
-        return
-    name = rows[chosen[0]]["file_name"]
-    with st.container(border=True):
-        st.markdown(f":material/description: **{esc(name)}**")
-        open_column, reindex_column, delete_column = st.columns(3)
-        if link := _link(ws, name):
-            open_column.link_button("Open CV", link, icon=":material/open_in_new:", width="stretch")
+    names = [rows[i]["file_name"] for i in event.selection.rows if i < len(rows)]
+    with bar:
+        count_column, reindex_column, delete_column, update_column = st.columns([2.2, 1.4, 1.2, 2], vertical_alignment="center")
+        count_column.caption(f"{len(names)} selected of {len(rows)}" if names else "Select rows to re-index or delete them.")
         reindex_column.button(
-            "Re-index", icon=":material/refresh:", width="stretch", on_click=_reindex, args=(ws, name),
-            help="Process the stored file again, for example after the pipeline changed",
+            "Re-index", icon=":material/refresh:", width="stretch", disabled=not names, on_click=_reindex, args=(ws, names),
+            help="Process the stored files again, for example after the pipeline changed",
         )
-        with delete_column.popover("Delete", icon=":material/delete:", width="stretch"):
-            st.write(f"Delete **{esc(name)}** from storage and from search? This cannot be undone.")
-            st.button("Yes, delete", type="primary", icon=":material/delete:", on_click=_delete, args=(ws, name))
+        with delete_column.popover("Delete", icon=":material/delete:", width="stretch", disabled=not names):
+            st.write(f"Delete {len(names)} CV{'' if len(names) == 1 else 's'} from storage and from search? This cannot be undone.")
+            st.button("Yes, delete", type="primary", icon=":material/delete:", on_click=_delete, args=(ws, names))
+        update_column.button(
+            "Re-process older CVs", icon=":material/published_with_changes:", width="stretch", on_click=_update_all, args=(ws, cvs),
+            help="Checks every CV against the current pipeline and re-indexes only those processed by an older version. "
+            "The status panel shows the unchanged ones as skipped.",
+        )
 
 
 def _link(ws: Workspace, file_name: str) -> str | None:
@@ -166,19 +164,24 @@ def _update_all(ws: Workspace, names: list[str]) -> None:
         st.session_state.notice = (f"Could not update the CVs: {str(error).splitlines()[0][:150]}", ":material/error:")
 
 
-def _reindex(ws: Workspace, name: str) -> None:
-    """Queue the stored original for processing again; the status panel shows its progress."""
+def _reindex(ws: Workspace, names: list[str]) -> None:
+    """Queue the stored originals for processing again; the status panel shows their progress."""
     try:
-        jobs.queue_for(ws).submit([(name, None)], force=True)
+        jobs.queue_for(ws).submit([(name, None) for name in names], force=True)
     except Exception as error:
-        st.session_state.notice = (f"Could not re-index {name}: {str(error).splitlines()[0][:150]}", ":material/error:")
+        st.session_state.notice = (f"Could not re-index: {str(error).splitlines()[0][:150]}", ":material/error:")
+    st.session_state.library_reset = st.session_state.get("library_reset", 0) + 1  # clears the row selection
 
 
-def _delete(ws: Workspace, name: str) -> None:
+def _delete(ws: Workspace, names: list[str]) -> None:
+    deleted = 0
     try:
-        ingest.delete_cv(ws, name)
-        forget_cv_list()
-        jobs.queue_for(ws).forget(name)
-        st.session_state.notice = (f"Deleted {name}", ":material/task_alt:")
+        for name in names:
+            ingest.delete_cv(ws, name)
+            jobs.queue_for(ws).forget(name)
+            deleted += 1
+        st.session_state.notice = (f"Deleted {deleted} CV{'' if deleted == 1 else 's'}", ":material/task_alt:")
     except Exception as error:
-        st.session_state.notice = (f"Could not delete {name}: {str(error).splitlines()[0][:150]}", ":material/error:")
+        st.session_state.notice = (f"Deleted {deleted} of {len(names)}, then failed: {str(error).splitlines()[0][:150]}", ":material/error:")
+    forget_cv_list()
+    st.session_state.library_reset = st.session_state.get("library_reset", 0) + 1

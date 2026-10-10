@@ -141,6 +141,10 @@ def account_menu(user: auth.User) -> None:
         st.divider()
         st.markdown("**Chat settings**")
         st.toggle(
+            "Show technical details", key="show_details",
+            help="Adds a Details panel under each answer: how the question was routed, what was searched, the settings used and where the time went.",
+        )
+        st.toggle(
             "Query expansion", key="expand_queries",
             help="Also search two reworded versions of each question and merge the results. "
             "Finds more, but answers start 1 to 2 seconds later and each question uses three semantic searches.",

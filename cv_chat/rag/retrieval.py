@@ -74,6 +74,51 @@ def retrieve(
     return rank_cvs(results)
 
 
+def retrieve_top_k(
+    ws: Workspace, queries: list[str], sections: list[str], cvs: dict[str, str], trace: Trace | None = None,
+    k: int = config.TOP_K, budget: int = config.CONTEXT_CHARS,
+) -> list[dict]:
+    """For a question about everyone (a comparison, a ranking): a fixed number of candidates instead of top-p, so none is dropped
+    for scoring lower than the best. `cvs` maps each candidate's file name to its file id.
+    The first search returns only the best 50 chunks, which can come from a few CVs, so the CVs it missed are searched
+    again (at most COVER_ROUNDS times) until k CVs, or all of them, are covered."""
+    if len(queries) == 1:
+        results = search(ws, queries[0], sections, None, trace=trace)
+    else:
+        with ThreadPoolExecutor(max_workers=len(queries)) as pool:
+            results = fuse(list(pool.map(lambda query: search(ws, query, sections, None, trace=trace), queries)))
+    aim = min(k, len(cvs))
+    for _ in range(config.COVER_ROUNDS):
+        found = {result["file_name"] for result in results}
+        missing = [file_id for name, file_id in cvs.items() if name not in found]
+        if len(found) >= aim or not missing:
+            break
+        results = results + search(ws, queries[0], sections, missing, trace=trace)
+    return rank_top_k(results, k, budget)
+
+
+def rank_top_k(results: list[dict], k: int, budget: int) -> list[dict]:
+    """The best `k` CVs (a CV is as relevant as its best chunk), each with an equal share of `budget` characters filled with
+    its most relevant chunks (at least one). Best CV first, each CV's chunks in reading order."""
+    if not results:
+        return []
+    groups: dict[str, list[tuple[float, dict]]] = {}
+    for weight, chunk in zip(_weights(results), results):
+        groups.setdefault(chunk["file_name"], []).append((weight, chunk))
+    cvs = sorted((sorted(group, key=lambda item: -item[0]) for group in groups.values()), key=lambda group: -group[0][0])[:k]
+    share = budget // len(cvs)
+    picked = []
+    for group in cvs:
+        kept, used = [], 0
+        for _, chunk in group:
+            if kept and used + len(chunk["content"]) > share:
+                break
+            kept.append(chunk)
+            used += len(chunk["content"])
+        picked += sorted(kept, key=lambda chunk: (chunk.get("page") is None, chunk.get("page") or 0))
+    return picked
+
+
 def _hybrid(ws: Workspace, query: str, vector: list[float], sections: list[str], file_ids: list[str] | None, where: str | None) -> list[dict]:
     """When the router picked sections, search those sections and everything at the same time and merge the two lists, so
     a CV with unusual headings is still found and no "too few hits" threshold is needed."""

@@ -352,6 +352,8 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 | `CONTEXT_CHARS` | `36000` | The most CV text sent to the chat model for one question (about 9,000 tokens). Excerpts are added in order of relevance until it is used up, so this one number replaces separate limits on CVs and excerpts. The agent's tools use half of it each |
 | `HISTORY_CHARS` | `6000` | The most recent chat sent along with a question. As many of the latest messages as fit are used |
 | `RETRIEVE_K` | `50` | Chunks fetched and re-ranked per search, then grouped by candidate (50 is the semantic ranker's limit) |
+| `TOP_K` | `20` | Most candidates a question about everyone (a comparison, a ranking, a list) covers. Each gets an equal share of `CONTEXT_CHARS`. The router decides when a question is about everyone; those use top-k instead of top-p |
+| `COVER_ROUNDS` | `3` | Extra searches, aimed at the CVs the first search missed, so a question about everyone reaches every candidate |
 | `TOP_P` | `0.8` | Share of the relevance that the kept CVs, and the kept excerpts of each, must cover. Higher sends more, lower sends less |
 | `EXPANDED_QUERIES` | `2` | Alternative queries searched when **Query expansion** is on |
 | `RRF_K` | `60` | The standard constant of reciprocal rank fusion (from the original paper), used to merge the searches. Leave it |
@@ -376,7 +378,7 @@ The search index settings (text analyzer `en.microsoft`, field weights, boosted 
 - **Scanned PDFs go through OCR**, which is slower than reading a text PDF. A PDF with no readable text at all is reported as "No text found".
 - **DOCX files have no page numbers**, so their chunks are stored as page 1.
 - **Every question makes a router call** before the search, which adds a little time before the answer starts streaming. Query expansion adds one more call and two more searches. A complex question can take several model calls, often 10 to 30 seconds.
-- **Simple questions send only the relevant CVs** (top-p, within the `CONTEXT_CHARS` text budget), so a question about a large pile of CVs may not cover every one. That is what the agent is for.
+- **Specific questions send only the relevant CVs** (top-p, within the `CONTEXT_CHARS` text budget). A question the router reads as about everyone (compare, rank or list the candidates) uses top-k instead: up to `TOP_K` CVs, an equal share of the text each, with extra searches for the CVs the first one missed. With more than `TOP_K` CVs it keeps the best `TOP_K`.
 - **The search is built for English CVs.** The keyword analyzer is English, and the router writes the search query in English. Questions can be in any language, but CVs in another language would need another analyzer and a new index.
 - **Years of experience are not read.** A generic NER cannot work them out (see step 4 above), so the app does not show or filter by them. If you need them, they would have to come from a model that reads the whole CV.
 - **Contact details are personal data.** Email, phone and location are stored as fields in the search index, next to the CV text. Anyone with the search key can read them.
