@@ -1,202 +1,365 @@
 <div align="center">
 
-# Chat with CVs
+<img src="cv_chat/ui/assets/logo.svg" alt="CV Lens" height="72">
+
+# CV Lens · Chat with your CVs
 
 **Upload a pile of CVs, then just ask questions about them.**
 
-Every answer comes from the uploaded CVs, is written in the language you asked in, and shows which CVs and excerpts it was based on.
+Every answer comes only from the uploaded CVs, is written in the language you asked in, and cites the CV and page behind each claim.
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B?logo=streamlit&logoColor=white)
-![Azure](https://img.shields.io/badge/Cloud-Azure-0078D4?logo=microsoftazure&logoColor=white)
-![conda](https://img.shields.io/badge/Env-conda-44A833?logo=anaconda&logoColor=white)
+![Azure OpenAI](https://img.shields.io/badge/Azure-OpenAI-0078D4?logo=microsoftazure&logoColor=white)
+![Azure AI Search](https://img.shields.io/badge/Azure-AI%20Search-0078D4?logo=microsoftazure&logoColor=white)
+![Document Intelligence](https://img.shields.io/badge/Azure-Document%20Intelligence-0078D4?logo=microsoftazure&logoColor=white)
+![Postgres](https://img.shields.io/badge/Postgres-16-4169E1?logo=postgresql&logoColor=white)
 
 </div>
 
 ---
 
-## Contents
+## Table of contents
 
-- [What it does](#what-it-does)
-- [How it works](#how-it-works)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Pipeline 1: ingestion](#pipeline-1-ingestion-once-per-cv)
+- [Pipeline 2: answering a question](#pipeline-2-answering-a-question-every-time-you-ask)
+- [Data model](#data-model)
+- [Accounts, sessions and per-user isolation](#accounts-sessions-and-per-user-isolation)
+- [Security](#security)
 - [Quick start](#quick-start)
 - [Using the app](#using-the-app)
-- [Accounts and Postgres](#accounts-and-postgres)
 - [Project structure](#project-structure)
 - [Configuration](#configuration)
+- [Caching](#caching)
+- [Observability](#observability)
 - [Good to know](#good-to-know)
-- [Chat features in detail](#chat-features-in-detail)
 - [Troubleshooting](#troubleshooting)
-- [Run the pipeline without the UI](#run-the-pipeline-without-the-ui)
+- [Running the pipelines without the UI](#running-the-pipelines-without-the-ui)
 
 ---
 
-## What it does
+## Features
 
-| Step | What you do | What the app does |
-|---|---|---|
-| 0. Account | Sign up or log in | Gives you your own CV storage, search index and saved chats |
-| 1. Upload | Drop PDF or DOCX CVs in the **Library** | Reads and stores them |
-| 2. Process | Click **Process CVs** | Reads each CV's layout, splits it by section and makes it searchable, several CVs at the same time. CVs that are already indexed and unchanged are skipped |
-| 3. Ask | Type a question in the chat, in any language | Works out what kind of question it is, finds the relevant parts of the CVs (or plans several searches for a complex question) and streams an answer in your language, with `[file, p.N]` citations |
-| 4. Check | Open **Sources** or **Details** under an answer | Sources: which CVs, and which excerpts, the answer used. Details: how the question was routed, what was searched, and where the time went |
-| 5. Browse | Switch to **Candidates**, or reopen an earlier chat from the sidebar | Shows each CV as a card (name, title, email, location) with filters, and keeps every chat you had |
+- **Chat over many CVs** in any language. The search runs in English, the answer comes back in your language.
+- **Cited answers.** Every claim is followed by `[file name, p.N]`, and a **Sources** list shows the excerpt and a signed link to the original file.
+- **Layout-aware reading** with Azure AI Document Intelligence: multi-column CVs come out in reading order, tables become markdown, headings are detected. PDF and DOCX, scans through OCR.
+- **Hybrid retrieval**: keyword + vector search, boosted for names, titles and key sections, re-ranked by Azure's semantic ranker.
+- **Adaptive context**: instead of "top 5", the app keeps the candidates and excerpts that hold 80% of the relevance (top-p), and switches to a fixed top-k for questions about everyone.
+- **A router and an agent**: one model call classifies each message (chat, simple, complex, clarify); complex questions go to a capped tool-using agent.
+- **Candidate details without rules**: name, job title, email, phone and location are read by a generic NER model (GLiNER), not by regexes.
+- **Candidates view** with cards, filters and side-by-side comparison, and a **Library** with live ingestion status.
+- **Accounts, saved chats, feedback**, per-user Azure resources and caches.
+- **Transparent**: a **Details** panel shows the route, every search, every agent step and a timeline of where the time went.
+- **Hardened against prompt injection** in CV text, with a graceful handling of Azure's content filter.
 
-The three required Azure services each have one job:
+### The three Azure services plus Postgres
 
 | Service | Job in this app |
 |---|---|
-| **Azure Blob Storage** | Keeps the original CV files |
-| **Azure AI Search** | Holds the searchable CV content, finds the parts relevant to a question and re-ranks them (semantic ranker) |
-| **Azure OpenAI** | Turns text into numbers for searching (embeddings) and writes the answers |
+| **Azure AI Document Intelligence** | Reads each CV's layout (`prebuilt-layout`): reading order, headings, tables, OCR |
+| **Azure Blob Storage** | Keeps the original CV files, one private container per user |
+| **Azure AI Search** | Holds the chunks and their vectors, runs hybrid search and semantic re-ranking, one index per user |
+| **Azure OpenAI** | Embeddings for chunks and questions; chat model for routing, answers and the agent |
+| **Postgres** (Docker) | Accounts, sessions, saved chats and feedback |
 
 ---
 
-## How it works
-
-This is a standard "chat with your documents" design, also called **RAG** (retrieval-augmented generation). The model never reads all the CVs. It only sees the few pieces that were found for the question.
-
-### 1. Processing CVs (once per CV)
+## Architecture
 
 ```mermaid
 flowchart LR
-    A["CV file<br/>PDF or DOCX"] --> H{"Already indexed<br/>and unchanged?"}
-    H -- yes --> Z["Skip"]
-    H -- no --> B["Extract with Document Intelligence<br/>layout, headings, tables"]
-    B --> C["Split by section"]
-    C --> M["Read name, title, email,<br/>phone, location: generic NER<br/>(GLiNER), no rules"]
-    M --> D["Embed each chunk<br/>Azure OpenAI"]
-    D --> E[("Azure AI Search<br/>chunks and vectors")]
-    A --> F[("Azure Blob Storage<br/>original file")]
+    subgraph Browser
+        UI["Streamlit UI<br/>Chat · Candidates · Library"]
+    end
+
+    subgraph App["Python app (cv_chat/)"]
+        direction TB
+        ui["ui/"]
+        rag["rag/<br/>ingest · jobs · qa · retrieval · agent"]
+        proc["processing/<br/>extract · chunking · sections · entities"]
+        svc["services/<br/>blob · search · openai"]
+        auth["auth.py · history.py · db.py"]
+        ui --> rag
+        ui --> auth
+        rag --> proc
+        rag --> svc
+    end
+
+    UI <--> ui
+    auth <--> PG[("Postgres<br/>users · sessions<br/>chats · messages")]
+    proc -. "layout" .-> DI["Azure Document<br/>Intelligence"]
+    svc <--> BLOB[("Azure Blob Storage<br/>original CVs")]
+    svc <--> AIS[("Azure AI Search<br/>chunks + vectors")]
+    svc <--> AOAI["Azure OpenAI<br/>embeddings + chat"]
 ```
 
-1. **Skip unchanged CVs.** Every chunk is stored with a hash of the file content (plus a fingerprint of the extraction, chunking, section and details-reading code and settings). If the stored hash matches, the CV is skipped and shown as "already indexed, unchanged".
-2. **Extract with Azure AI Document Intelligence.** Its `prebuilt-layout` model reads the page layout, so multi-column CVs come out in the right reading order, tables become markdown, and section headings are detected. It handles PDF and DOCX. The result is cached on disk in `.cache/extracted/` (by file content), so changing the chunking never calls the service again.
-3. **Split by section.** The CV is cut at its headings (the ones the service found, plus short ALL-CAPS lines). Each section becomes one chunk and starts with its heading. Only a section longer than `CHUNK_SIZE` (1500 characters) is split further, with 20% overlap, preferring line breaks. Text before the first heading goes under "Other".
-4. **Read the CV's details (a generic NER, no rules).** A generic named-entity model, [GLiNER](https://github.com/urchade/GLiNER) (medium, Apache-2.0, 1.5 GB, downloaded the first time), reads the first page of the CV and is asked, one label at a time, for the candidate's **name** ("person name"), **job title**, **email address**, **phone number** and **location** ("city, country"). It keeps the highest-scoring answer for each. There are no patterns, no word lists and **no fallback**: if the model cannot be loaded, reading the CV fails with a clear message. It runs on your computer (on the GPU if there is one) and costs no Azure call, but it is slow on CPU, about 8 seconds per CV. **Years of experience are not read:** a generic NER only finds words that are written in the text, and years of experience is worked out from which dates are jobs, which it cannot tell from a degree's dates. Measured on 8 real CVs it found a name, title, email and phone for all 8 and a location for 6, but some answers are wrong, so check the **Candidates** view after uploading. Asking for all five labels in one go found far less than asking one at a time, and reading the second page only added wrong answers.
-5. **Label each chunk.** The heading is kept as `section` (as written in the CV) and also mapped to a standard `section_type`: experience, education, skills, projects, summary, certifications, languages, contact or other. The page number is stored too.
-6. **Embed each chunk.** An embedding is a list of numbers that captures the meaning of a text. Each chunk is sent to Azure OpenAI together with its file name and the candidate's name and title, so even a chunk from page 3 still points to the right CV. The batch size and the number of requests in flight are learned while running: a rate-limit answer (429) halves the number of requests in flight and a run of successes raises it again, and a batch the service says is too large is halved and remembered.
-7. **Save to Azure AI Search.** The new chunks are uploaded first, then chunks the new version no longer has are deleted, so a CV is never missing from the index.
-8. **Save the original** to Azure Blob Storage, then clear the answer cache (see [Caching](#caching)).
+The code is layered so each part has one job and only imports what is below it:
 
-Several CVs are processed in parallel (as many at a time as the computer has cores, between 2 and 8) by a background queue, and the Library shows each file's state live (the sidebar shows a progress bar on every page while it runs). CVs are read by the service in parallel, and other CVs can embed and upload while one is being read. One CV failing, for example a scanned PDF with no text, never stops the others.
-
-### 2. Answering a question (every time you ask)
-
-```mermaid
-flowchart TD
-    Q["Your question<br/>+ recent chat"] --> R{"Router<br/>one model call"}
-    R -- "chat (hi, thanks)" --> C["Reply without searching"]
-    R -- simple --> X["Optional: reworded queries"]
-    X --> S[("Azure AI Search<br/>hybrid search + semantic ranker<br/>name, title and section boosts")]
-    S --> T["Top-p: keep the relevant CVs<br/>and their relevant excerpts"]
-    T --> M["Azure OpenAI chat model<br/>streams the answer in your language"]
-    R -- complex --> G["Agent: list_cvs, search_cvs, get_cv<br/>max 5 rounds, 30 s"]
-    G --> M
-    C --> A["Answer + Sources + Details"]
-    M --> A
-```
-
-1. **Route and rewrite the question.** One quick model call decides whether the message needs a search at all (*chat*: greetings and thanks do not), needs one search (*simple*), or is *complex* (comparing, ranking, counting or listing across many CVs, or several questions in one). It also turns a follow-up like "what about his education?" into a standalone **English** search query using the recent chat (the CVs are English, so this works for a question asked in any language), and picks which CV sections hold the answer (for example `education`). If this step fails, the original question is searched as it is.
-
-   Two more outcomes come from the same call. If the question cannot be answered without a missing detail ("who is the best?"), the app **asks a short clarifying question** instead of guessing, and does not search. If you ask for a specific job role ("find a data engineer"), the role is checked first: it must be in a CV's job title or text. If no CV has it, the app says so and lists the job titles that exist, instead of returning loosely related candidates; if some do, only those CVs are searched.
-2. **Query expansion (optional, in the account menu under Chat settings).** The question is also reworded two ways and each version is searched; the result lists are merged with reciprocal rank fusion, so a chunk found by several queries rises to the top.
-3. **Embed the query** the same way as the chunks. Embeddings of repeated queries are cached in memory.
-4. **Hybrid search, filtered by section.** Azure AI Search runs two searches in one query and merges the rankings:
-   - *keyword search* finds exact words, such as a skill, tool or name (English stemming: "built" also finds "building"),
-   - *vector search* finds chunks with a similar meaning, even if the words differ ("cloud" finds "Azure").
-
-   A scoring profile makes a keyword match in the candidate name or job title count more than the same words in the body text, and favours the *experience* and *skills* sections. When sections were picked, the focused search and a search of everything run at the same time and their results are merged, so a CV with unusual headings is still found.
-5. **Semantic re-ranking.** Azure's semantic ranker reads the question and each of the top 50 candidates and gives each a relevance score, then re-orders them by how well they answer it. It also returns the most relevant passage of each chunk, which the Sources list shows.
-6. **Keep what is relevant (top-p).** The search returns up to 50 chunks with the ranker's relevance score. They are grouped by CV, and a CV counts as relevant as its best chunk. Instead of a fixed number, the best CVs are kept until they hold 80% of the relevance (`TOP_P`), then the same is done for the excerpts inside each kept CV. Each score's share is its softmax, and the softmax's sharpness is **taken from how spread out this search's scores are**, so a clear winner among weak results takes most of the share and a close field shares it. There are no counts of CVs or excerpts: excerpts are added, most relevant first, until the text budget (`CONTEXT_CHARS`) is used. A CV's excerpts stay together, in reading order, with the best CV first.
-7. **Ask the chat model.** It receives the excerpts (each labelled with CV, section and page, and the first one of every CV with a line about the candidate: name, title, contact), the question and as many of the latest chat messages as fit in `HISTORY_CHARS`. It is told to answer only from the excerpts, to cite `[file name, p.N]`, to answer in the language of the question, and to say so when the answer is not there. The answer streams into the chat as it is written.
-8. **Complex questions go to the agent** instead of steps 2 to 7. It can list all CVs with their name and title, search (optionally limited to some CVs or filtered by job title) and read a whole CV. Its steps appear in the status box while it works.
-9. **Show the sources and the details:** the CVs the answer came from, and a **Details** dropdown with the route, timeline, searches and excerpts used.
-
-Any text that comes from a CV is treated as data, not as instructions (see [Safety](#safety)).
-
-### What happens when you open the app
-
-`streamlit run app.py` starts [app.py](app.py). Streamlit runs that file from top to bottom at startup and again on every click or message:
-
-1. Show the login and sign-up screen until someone is logged in (a session cookie keeps you logged in).
-2. Load the settings and connect to Azure (a missing `.env` value shows a clear error), and make sure this user's container and index exist.
-3. Draw the sidebar: the account menu, **New chat**, chat search and the chat list. Nothing else, so it stays a simple place to move between chats.
-4. Draw the main area: a top bar with **Chat**, **Candidates** and **Library**, and the view you picked (only that one is drawn).
+| Layer | Rule |
+|---|---|
+| `ui/` | Only draws screens and calls `rag/`. |
+| `rag/` | Combines `services/` and `processing/` into the two pipelines. Never imports Streamlit. |
+| `services/` | Talks to Azure and nothing else. One small file per service. |
+| `processing/` | Turns a file into pages, chunks and details. Never touches Azure search/storage or Streamlit, so it can be tested alone. |
+| `config.py` | All settings: Azure values from `.env`, tunables as constants. A missing value fails at import with one error naming all of them. |
 
 ---
 
-## Accounts and Postgres
+## Pipeline 1: ingestion (once per CV)
 
-Users sign up and log in with an email and password. If you forget your password, the **Forgot password** tab resets it with the recovery code you were given at sign-up (see below). Accounts, sessions and chats are stored in Postgres, which runs in Docker:
+The model never reads all the CVs. This pipeline turns each file into small labelled chunks that can be found later.
 
-```bash
-docker compose up -d          # starts Postgres on 127.0.0.1:5432
-cp .env.example .env          # DATABASE_URL is already filled in for this setup
-streamlit run app.py
+```mermaid
+flowchart TD
+    A["Uploaded PDF / DOCX"] --> V["Validate file name"]
+    V --> H{"Hash of content + pipeline<br/>fingerprint already indexed?"}
+    H -- "yes (and not forced)" --> Z["Skipped"]
+    H -- no --> X["Extract<br/>Azure Document Intelligence<br/>(cached on disk by content)"]
+    X --> T{"Any text?"}
+    T -- no --> F["Failed: No text found"]
+    T -- yes --> C["Chunk by section<br/>(headings, ALL-CAPS lines)"]
+    C --> N["Read name, title, email,<br/>phone, location<br/>GLiNER NER"]
+    N --> E["Embed every chunk<br/>Azure OpenAI<br/>(adaptive batching)"]
+    E --> U["Upload chunks to<br/>Azure AI Search"]
+    U --> D["Delete stale chunks<br/>of the old version"]
+    D --> B["Upload original to<br/>Azure Blob Storage"]
+    B --> K["Clear this user's cache"]
 ```
 
-Passwords are stored as argon2 hashes, and the recovery code as a SHA-256 hash. A login is a random token in a browser cookie; only its hash is stored in the database, and it expires after 14 days or when you log out. The session is checked against the database on every page run, so ending it on one device (log out, password change, account deletion) also ends an already-open tab on another device at its next click. Sign-ups are capped at 15 users, because each user gets their own search index and the Azure Basic tier allows 15.
+Implemented in [`cv_chat/rag/ingest.py`](cv_chat/rag/ingest.py) (`process_cv`), driven by [`cv_chat/rag/jobs.py`](cv_chat/rag/jobs.py).
 
-Two things to change before the app is reachable from anywhere but your own machine:
+### Step by step
 
-- The session cookie is written by a small script in the page, so it is not marked `HttpOnly` or `Secure`. Serve the app over HTTPS.
+| # | Step | What happens | Code |
+|---|---|---|---|
+| 1 | **Validate the name** | Upload names come from the browser: 1 to 200 characters, no `/` or `\`, not `.` or `..`, no control characters. | `ingest.validate_file_name` |
+| 2 | **Skip if unchanged** | The CV's `file_id` is the MD5 of its file name. The `content_hash` is the MD5 of the file bytes plus a *pipeline fingerprint* (chunk size, overlap, `INDEX_VERSION` and the source of `extract.py`, `chunking.py`, `sections.py`, `entities.py`). If the stored hash matches, the CV is skipped. Editing any of those four files, even a comment, makes every CV "outdated". | `_pipeline_fingerprint`, `search_index.get_hash` |
+| 3 | **Extract** | The bytes go to Document Intelligence `prebuilt-layout`. Paragraphs and tables are merged by their offset in the document, which gives the correct **reading order**. Table cells become one markdown table (their paragraphs are dropped so nothing is duplicated). Paragraphs with the role `title` or `sectionHeading` become the **headers**; `pageNumber` and `pageFooter` are dropped. The result (`pages`, `headers`) is cached in `.cache/extracted/<md5>.json`, written to a temp file and renamed, so parallel CVs never see half a file. | `processing/extract.py` |
+| 4 | **Chunk by section** | A line is a heading if the layout model labelled it, or it is a short (at most 5 words, 40 characters) ALL-CAPS line. Each section becomes one chunk that starts with its heading. Only a section longer than `CHUNK_SIZE` (1500 characters) is cut further, with 20% overlap, preferring line breaks. Text before the first heading goes under **Other**. A heading with no body makes no chunk. | `processing/chunking.py` |
+| 5 | **Read the candidate's details** | GLiNER (`gliner_medium-v2.1`) is asked, **one label at a time**, for *person name*, *job title*, *email address*, *phone number* and *location* on the first page. It first finds the **header block** (up to 10 lines before and 1 after the email line, because a layout reader can place the header anywhere), and takes the first confident answer from there. Anything missing is searched in the following sections, in reading order. There are no patterns, no word lists and **no fallback**: if the model cannot load, the CV fails with a clear message. Values are cleaned (no angle brackets, one line, 100 characters). Years of experience are deliberately **not** read: a generic NER cannot tell a job's dates from a degree's. | `processing/entities.py` |
+| 6 | **Label each chunk** | The heading is stored as `section` (as written) and mapped to a standard `section_type`: `experience`, `education`, `skills`, `projects`, `summary`, `certifications`, `languages`, `contact` or `other`. The page number is stored too. | `processing/sections.py` |
+| 7 | **Embed** | Each chunk is embedded as `CV: <file name>\nCandidate: <name>, <title>\n<chunk text>`, so a chunk from page 3 still points to the right person. Batches start at 64 texts and are **halved and remembered** if Azure says a batch is too large. The number of requests in flight is an `AdaptiveLimit`: it starts at `min(4, cores)`, **halves on a 429** (after waiting as long as Azure's `retry-after` asks) and grows by one after 10 successes. | `services/openai_service.py` |
+| 8 | **Save to the index** | Chunks are uploaded **first**, then chunks the new version no longer has are deleted, so a CV is never missing from the index, even if the run is interrupted. | `search_index.upload_chunks`, `delete_stale_chunks` |
+| 9 | **Save the original** | The file goes to the user's Blob container. | `blob_storage.upload_file` |
+| 10 | **Invalidate caches** | The user's whole cache is cleared (see [Caching](#caching)). | `cache.clear()` |
+
+Each chunk stores the plain Blob address of its CV (`file_url`); the container is private, so signed links are made on demand (see [Security](#security)).
+
+### The background queue
+
+[`jobs.py`](cv_chat/rag/jobs.py) runs ingestion so the app stays usable:
+
+- One `IngestQueue` per user, all sharing one `ThreadPoolExecutor` of `cpu_count` workers (clamped to 2 to 8). The work is I/O-bound.
+- A job moves through `queued → processing (stage) → indexed | skipped | failed`. Stages shown live: *reading layout → reading name, title and contact → embedding → saving*.
+- The Library polls the job list every 2 seconds, and the sidebar shows a progress bar on every page while jobs run.
+- **One failing CV never stops the others** (a scanned PDF with no text, a bad name, a rate limit).
+- On submit, if nothing is running, `remove_deleted_cvs` deletes index chunks of CVs whose blob no longer exists (for example deleted in the portal).
+- **Re-index** passes `data=None`, which downloads the stored original instead of asking for an upload. **Update outdated CVs** re-runs every stored CV; those already current are skipped by the hash check.
+
+---
+
+## Pipeline 2: answering a question (every time you ask)
+
+```mermaid
+flowchart TD
+    Q["Question + recent chat"] --> AC{"Answer cache hit?<br/>(opt-in)"}
+    AC -- yes --> OUT
+    AC -- no --> R["Router: one JSON model call<br/>route · query · sections · role · everyone · ask"]
+
+    R -- chat --> CH["Short reply, no search<br/>(cached by text)"]
+    R -- clarify --> CL["Ask the missing detail"]
+    R --> RO{"Specific role asked?"}
+    RO -- "no CV has it" --> RM["Say so + list real job titles"]
+    RO -- "some CVs" --> SC["Narrow the scope to them"]
+    RO -- no --> EV
+    SC --> EV{"everyone?"}
+
+    EV -- yes --> TK["Top-k retrieval<br/>+ cover missed CVs"]
+    EV -- no --> CX{"complex?"}
+    CX -- yes --> AG["Agent<br/>list_cvs · search_cvs · get_cv<br/>5 rounds / 30 s"]
+    CX -- no --> XP["Optional query expansion"]
+    XP --> HS["Hybrid search + semantic ranker<br/>(x queries, fused with RRF)"]
+    HS --> TP["Top-p over CVs, then over excerpts"]
+
+    TK --> GEN
+    TP --> GEN["Chat model, streamed<br/>excerpts as data, cited"]
+    AG --> OUT
+    GEN --> OUT["Answer + Sources + Details"]
+    CH --> OUT
+    CL --> OUT
+    RM --> OUT
+```
+
+Implemented in [`cv_chat/rag/qa.py`](cv_chat/rag/qa.py) (`ask` and `_answer`) and [`cv_chat/rag/retrieval.py`](cv_chat/rag/retrieval.py).
+
+### 1. Route and rewrite (one model call)
+
+[`_route`](cv_chat/rag/qa.py) sends the latest message and as much recent chat as fits in `HISTORY_CHARS` and expects JSON:
+
+| Field | Meaning |
+|---|---|
+| `route` | `chat` (greeting, thanks, off-topic: no search), `simple` (one search is enough), `complex` (compare, rank, count, list across many CVs, or several questions in one), `clarify` (a missing detail makes it unanswerable, such as "who is the best?" without saying for what; never asked twice in a row) |
+| `query` | The message rewritten to stand alone, follow-ups resolved from the chat, **written in English** whatever the language |
+| `sections` | Which `section_type`s hold the answer, or `[]` when unsure |
+| `role` | A specific job role the user wants candidates for ("find a data engineer"), else empty |
+| `everyone` | `true` when the question compares, ranks or lists all the candidates on one point |
+| `ask` | For `clarify` only: one short question in the user's language |
+
+If the call fails or the JSON is unusable, the app falls back to a plain search of the raw question: **routing only improves the search, it can never block an answer**.
+
+### 2. Role check
+
+When `role` is set, [`roles.find`](cv_chat/rag/roles.py) looks for CVs where every word of the role is in the stored job title or in the CV text. If **no** CV has it, the app answers "No CV has the role X" and lists the job titles that exist, instead of returning loosely related people. If some do, only those CVs are searched.
+
+### 3. Retrieval
+
+**Normal questions** (`simple`, not `everyone`):
+
+1. **Query expansion** (optional, account menu): two extra queries are generated, a keyword-only one and one worded like a CV would say it.
+2. **Embed** each query (in-memory `lru_cache`).
+3. **Hybrid search** ([`search_index.hybrid_search`](cv_chat/services/search_index.py)): one Azure query that combines
+   - *keyword search* on the English analyzer (`en.microsoft`, stemming and stop words), with the `cv` **scoring profile**: name match ×3, job title ×2, file name ×2, section heading ×1.5, body ×1, plus a +1.5 boost for chunks in the `experience` and `skills` sections;
+   - *vector search* (HNSW, cosine) over the chunk embeddings;
+   - merged by Azure, then re-ordered by the **semantic ranker** (top 50, `RETRIEVE_K`), which also returns the best passage of each chunk (the "caption") for the Sources list.
+4. If the router picked sections, the focused search **and** a search over everything run in parallel and are merged, so a CV with unusual headings is still found. No "too few hits" threshold is needed.
+5. With several queries, result lists are merged by **reciprocal rank fusion**: a chunk scores `1/(60 + rank)` in each list it appears in.
+6. If the service has no semantic ranker (Free tier), it logs a warning and uses plain hybrid search.
+
+**Keeping what is relevant (top-p)** ([`rank_cvs`](cv_chat/rag/retrieval.py)):
+
+- Each chunk's weight is its ranker score divided by the best score. A candidate counts as relevant as its best chunk.
+- Weights go through a softmax whose **temperature is the standard deviation of this search's weights** (floor 0.05): one clear winner among weak results takes most of the share, a close field shares it.
+- The best candidates are kept until they hold `TOP_P` (80%) of the relevance. Then the same is done for the excerpts inside each kept candidate.
+- Excerpts are added, most relevant candidate first, until `CONTEXT_CHARS` is used (the first excerpt always goes in). Each candidate's excerpts are re-sorted into reading order.
+
+There are no fixed counts of CVs or excerpts anywhere.
+
+**Questions about everyone** (`everyone: true`) use **top-k** ([`retrieve_top_k`](cv_chat/rag/retrieval.py)) so nobody is dropped for scoring lower than the best:
+
+1. One search (plus expansions) over all CVs.
+2. Up to `COVER_ROUNDS` (3) extra searches, restricted to the CVs the previous results missed, until `min(TOP_K, number of CVs)` are covered.
+3. The best `TOP_K` (20) candidates each get an **equal share** of `CONTEXT_CHARS`, filled with their most relevant chunks.
+
+**Complex questions** go to the agent instead.
+
+### 4. The agent (complex questions)
+
+[`agent.py`](cv_chat/rag/agent.py) runs a capped loop of model turns with three tools:
+
+| Tool | Does |
+|---|---|
+| `list_cvs` | Every CV with the name, title and contact read from it |
+| `search_cvs` | Hybrid search, optionally limited to some CVs, filtered by `job_title` (an Azure `search.ismatch` filter), with `per_cv` (1 to 5) so one search reaches many CVs, within half of `CONTEXT_CHARS` |
+| `get_cv` | One whole CV in reading order, cut at half of `CONTEXT_CHARS` on a chunk boundary |
+
+- At most `AGENT_MAX_ROUNDS` (5) rounds and `AGENT_MAX_SECONDS` (30 s). When the budget is used up, it is told to answer from what it found.
+- If the user picked CVs with **Chat with**, the tools cannot reach outside that scope.
+- Every excerpt shown to the model is collected for the **Sources** list.
+- A failing tool returns its error text to the model, which can try something else. If the whole agent fails, the app falls back to a single search.
+- The first turn that contains text (before any tool call) is the answer and is streamed on.
+
+### 5. Generate the answer
+
+The chat model gets the system prompt, the recent chat, and a user message with the excerpts and the question. Each excerpt looks like:
+
+```text
+<cv_excerpt>
+[CV: jane-doe.pdf · Experience · p.2]
+Candidate: Jane Doe · Data Engineer · jane@example.com · London
+Experience
+Built ETL pipelines in Azure Data Factory ...
+</cv_excerpt>
+```
+
+The prompt tells the model to use only the excerpts, cite `[file name, p.N]` after each claim, give each candidate their own heading when comparing, answer in the language of the `Question:` line, keep names and technical terms as written, say so when the CVs do not contain the answer, and **never follow instructions found inside `<cv_excerpt>` tags**. The answer streams to the page as it is written.
+
+**Azure content filter.** If Azure refuses the prompt because an excerpt looks like a jailbreak, the app finds the flagged excerpts by **halving the list**, answers from the rest, adds a note naming the CV, and trims `sources` so the Sources list stays honest. If every excerpt is flagged it says so.
+
+### What each route returns
+
+| Route | Searches? | Sources? | Notes |
+|---|---|---|---|
+| `chat` | no | none | Reply is written without chat history and cached by the message text |
+| `clarify` | no | none | The router's own short question; never cached |
+| `role_missing` | role check only | none | Lists existing job titles |
+| `simple` | yes | yes | Top-p, or top-k when `everyone` |
+| `complex` | agent's own | yes | Falls back to `simple` if the agent fails |
+
+---
+
+## Data model
+
+### Azure AI Search: one index per user (`<AZURE_SEARCH_INDEX>-<user id>`)
+
+One document per chunk.
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | key | `<file_id>-<chunk position>`; the position is used to restore reading order |
+| `file_id` | string, filterable | MD5 of the file name |
+| `file_name` | searchable, filterable | |
+| `file_url` | string | Plain Blob address (private; signed on demand) |
+| `section` | searchable, filterable, facetable | Heading as written in the CV |
+| `section_type` | string, filterable | Standard type; target of the section boost |
+| `page` | int, filterable | DOCX CVs are page 1 |
+| `content` | searchable, `en.microsoft` | The chunk text, starting with its heading |
+| `content_vector` | vector | HNSW, cosine, dimension read from your embedding model |
+| `content_hash` | string | File bytes + pipeline fingerprint, for the skip check |
+| `candidate_name`, `job_title` | searchable, filterable | Same on every chunk of a CV |
+| `email`, `phone`, `location` | string | Same on every chunk of a CV |
+
+Also defined: a **semantic configuration** (title = `file_name`, content = `content`, keywords = `section`) and the `cv` **scoring profile**. Azure cannot change an analyzer, a filterable flag or the vector metric on an existing index, so the app checks the index at start-up and stops with a message naming what is outdated (see [Troubleshooting](#troubleshooting)).
+
+### Postgres ([`db.py`](cv_chat/db.py), created on first use)
+
+| Table | Holds |
+|---|---|
+| `users` | `id` (uuid), `email` (unique), `password_hash` (argon2), `recovery_hash` (SHA-256) |
+| `sessions` | `token_hash` (SHA-256 of the cookie token), `user_id`, `expires_at` |
+| `conversations` | `id`, `user_id`, `title`, timestamps |
+| `messages` | `conversation_id`, `role` (user/assistant), `content`, `sources` (jsonb), `route`, `trace` (jsonb), `feedback` (1 / -1) |
+
+Everything cascades from `users`, so deleting an account removes its chats and sessions.
+
+### Blob Storage
+
+One private container per user (`<AZURE_STORAGE_CONTAINER>-<user id>`) holding the original files under their plain names. The same CV under another file name counts as a different CV.
+
+---
+
+## Accounts, sessions and per-user isolation
+
+- **Sign up / log in** with email and password. Passwords are **argon2** hashes. A login is a random token in a browser cookie; only its SHA-256 hash is stored. It expires after **14 days** or at logout, and is checked against the database on **every page run**, so ending a session anywhere (logout, password change, account deletion) ends already-open tabs at their next click.
+- **Recovery code.** At sign-up the app shows a one-time code like `ABCD-EFGH-JKLM-NPQR` and asks you to confirm you saved it. Only its SHA-256 is stored. **Forgot password** takes email + code + a new password, sets the password, logs you out everywhere and issues a **new** code (the used one stops working). The code is forgiving about case, dashes and spaces. Older accounts can create their first code from the account menu. If you lose both password and code, someone with database access has to remove the account.
+- **Sign-up cap.** 15 users (`MAX_USERS`), because each user gets their own search index and the Azure Basic tier allows 15.
+- **Per-user resources.** Sign-up creates the user's Blob container and search index; if either fails the account is not created.
+- **Isolation by construction.** A `Workspace` is built **only** from the logged-in user's UUID (anything else raises) and is passed to every function that touches Azure. Container and index names derive from it, and the answer cache and the ingest queue are per user too. A user's code has no way to name another user's data.
+- **Account menu** (your email at the top of the sidebar): Log out · Recovery code · Chat settings (Query expansion, Cache final answers, Clear cache) · Change password (logs out your other devices) · Delete my account (type your email, enter your password). Deletion removes Azure data first and stops if that fails; it waits for CVs that are being processed.
+
+---
+
+## Security
+
+| Area | What the code does |
+|---|---|
+| **Prompt injection** | Excerpts and the agent's CV list are wrapped in `<cv_excerpt>` tags. Tags inside CV text are removed **repeatedly** until stable (so a split tag cannot rebuild a closing tag). Every system prompt says to treat that text as untrusted data and never follow instructions in it. |
+| **Extracted details** | Name, title, etc. have angle brackets removed and are cut to 100 characters. |
+| **Azure's jailbreak filter** | A flagged excerpt is isolated by halving and left out with a note, instead of failing every question that retrieves that CV. |
+| **Output drawing** | [`ui/safe.py`](cv_chat/ui/safe.py) escapes text from CVs, file names and models and turns image syntax in answers into plain links, so `![x](https://...)` cannot load an image or leak data. Links stay clickable. |
+| **Links to originals** | Containers are private. Each link in Sources is a read-only SAS URL valid for **one hour**, made on demand for the logged-in user's own container (needs a connection string with the account key) and never given to the model. |
+| **Passwords and sessions** | argon2, hashed tokens, server-side expiry and revocation (see above). |
+| **File names** | Validated on upload (see ingestion step 1). |
+| **Data isolation** | `Workspace` type, per-user containers, indexes, caches and queues; every Postgres query is scoped by `user_id`. |
+| **Secrets** | `.env` is git-ignored. Never commit it. |
+
+**Before exposing the app beyond your own machine:**
+
+- The session cookie is written by a small script in the page, so it is not `HttpOnly` or `Secure`. **Serve the app over HTTPS.**
 - The Docker Postgres uses the password `cvchat` and listens only on `127.0.0.1`. Change the password in `docker-compose.yml` and `DATABASE_URL` if it is ever exposed.
-
-### Recovery code
-
-When you create an account, the app shows you a one-time **recovery code** (like `ABCD-EFGH-JKLM-NPQR`) and asks you to confirm you saved it. Keep it somewhere safe, such as a password manager. Only a hash of it is stored, so it can never be shown again. On the login page, **Forgot password** takes your email, the code and a new password. That sets the password, logs you out everywhere, and gives you a new code (the used one stops working). The code is forgiving about case, dashes and spaces. Accounts made before this feature can get their first code from the account menu (you enter your password). If you lose both your password and your code, the app cannot recover the account: someone with access to the database has to remove it.
-
-### Account menu
-
-Your email at the top of the sidebar opens the account menu:
-
-- **Log out** ends this session.
-- **Recovery code** replaces your code with a new one after you enter your password.
-- **Chat settings** has **Query expansion** (also search two reworded versions of each question: finds more, answers start 1 to 2 seconds later), **Cache final answers** (reuse the answer to an identical question in an identical chat: off by default, because a cached answer can be out of date) and **Clear cache**.
-- **Change password** asks for the current password and logs you out on your other devices.
-- **Delete my account** (you type your email and enter your password to confirm) deletes your CVs, your search index, your saved chats and your account. Azure data is deleted first: if that fails, nothing else is removed and you can try again. It waits until CVs that are being processed have finished.
-
-### Answers and starting out
-
-- **First run.** Until you have had a chat, the welcome screen shows a three-step checklist (Add CVs, Ask, Check the sources). The starter questions are built from your own CVs, for example "Compare the Engineers" or "Who is based in London?", with no model call. If there is too little data, fixed questions fill in.
-- **Under each answer.** Links to the CVs it used, thumbs up and down (saved with the answer, and shown again when you reopen the chat), a **Copy** menu, and **Regenerate** on the latest answer (it asks the same question again, skipping the answer cache, and keeps the earlier answer).
-- **Sources.** One card per CV with the candidate's name, job title, the best excerpt with its page, and an **Open** link.
-- **Messages.** Every empty screen and error says what happened and offers one button for the next step, such as **Open the Library**, **Clear the filters** or **Try again**.
-
-### Chats
-
-Every answer is saved, like in other chat apps. The sidebar holds only the chats: **New chat**, a **Search chats** box and the list of your chats grouped under **Today**, **Yesterday**, **Previous 7 days** and **Older**, newest first. The open chat is highlighted and its title is shown above the conversation, where you can rename it. Click a chat to reopen it with its sources and details. Each chat's ⋮ menu renames it, or deletes it after you tick a confirmation. Search looks in chat titles and in the text of every question and answer, and only ever in your own chats. The list shows 30 chats at first, with **Show more**. The model still only sees the last few messages of a chat.
-
-### Look and speed
-
-- **Where the time goes.** Start the app with `CV_PROFILE=1` (for example `CV_PROFILE=1 streamlit run app.py`, or `$env:CV_PROFILE=1` first in PowerShell) and the terminal prints one line per page run, such as `page run 1830 ms | login check 4 | imports 1210 | prepare workspace 590 | sidebar 18 | view: Chat 12`. It shows which step is slow on your machine. Without it nothing is measured.
-- **Start-up.** The first page after login no longer waits for the NER model to load, and the search index is not re-sent to Azure on every start when it is already complete.
-
-- **Fast clicks.** The list of CVs is kept for a few minutes instead of asking Azure Blob Storage on every click (it refreshes after an upload, a delete, or a re-index). Details panels are built only when you switch **Details** on under an answer, and a long chat first draws its latest 20 messages, with **Load earlier messages** for the rest.
-- **Theme.** The colours come from [.streamlit/config.toml](.streamlit/config.toml), with a light and a dark theme that follow your system setting. The accent colour, the animations and the right-to-left rules are in [cv_chat/ui/styles.css](cv_chat/ui/styles.css).
-- **Animation.** Messages, cards and the welcome screen fade up when they appear, buttons and cards respond when you hover or press them, and the login page eases in. If your system is set to reduce motion, all animation is switched off.
-- **Right-to-left languages.** Questions and answers in Arabic, Hebrew and similar languages are aligned from the right, paragraph by paragraph, and mixed text works too.
-- **Small screens.** The layout works down to phone width (the sidebar opens over the page, and each chat's title and menu stay on one line).
-
-### Candidates view
-
-The **Candidates** switch above the chat shows one card per CV with the name, job title, location and email read from the CV. Filter by text, sort by name, job title or location, open the original CV, or press **Chat with this CV** to answer only from it. Tick **Compare** on up to three candidates to see them side by side (job title, location, email), then press **Ask the chat to compare them** to open a chat limited to those CVs with the question ready. It reads the metadata of the first 1000 indexed chunks, so with very many CVs some may show without details.
-
-### Each user has their own data
-
-Signing up creates the user's own Blob container (`<AZURE_STORAGE_CONTAINER>-<user id>`) and their own Azure AI Search index (`<AZURE_SEARCH_INDEX>-<user id>`). If either cannot be created, the account is not created either. The two `.env` values are therefore **prefixes** now.
-
-Every call that touches Azure takes the logged-in user's workspace as an argument, and the workspace is built only from that user's id, so a user's code cannot reach another user's CVs. The answer cache and the ingest queue are per user as well. 
-If you used an older version of the app, its CVs are in the old shared container and index (the plain prefix names). They are not moved to any user: re-upload them from a user account, then delete the old container and index in the Azure portal.
-
-### Links to the original CVs
-
-Every chunk is stored with the plain Blob address of its CV (`file_url`) next to the file name. The containers are private, so that address does not open on its own. In the **Sources** list, each CV name is a link to a signed, read-only address that works for one hour and is made on demand for the logged-in user's own container (it needs a storage connection string that includes the account key). The address is never given to the model.
-
-CVs indexed before this feature have no address yet. Press **Update outdated CVs** to index them again.
-
-File names from uploads must be plain names: no `/` or `\`, no control characters, not `.` or `..`, at most 200 characters. Other files are shown as failed in the status panel.
+- Sign-up is open to anyone who can reach the app (until the cap), so put it behind your own access control before using real candidate data.
+- **Contact details are personal data.** Email, phone and location are stored as fields in the search index next to the CV text. Anyone with the search key can read them. CV pages are sent to Azure Document Intelligence for reading.
 
 ---
 
@@ -204,300 +367,236 @@ File names from uploads must be plain names: no `/` or `\`, no control character
 
 ### 1. What you need
 
-- Python 3.11 or newer with pip, for example [Miniconda](https://docs.conda.io/en/latest/miniconda.html) (the packages go into the active conda environment, the base one is fine)
+- Python 3.11+ with pip (for example [Miniconda](https://docs.conda.io/en/latest/miniconda.html))
 - [Docker](https://docs.docker.com/get-docker/) for the local Postgres
 - An Azure account with these resources already created:
   - a **Storage account**
-  - an **Azure AI Search** service on the **Basic tier or higher** (the semantic ranker is not available on Free)
-  - an **Azure OpenAI** resource with two deployments: an **embedding** model (for example `text-embedding-3-large`) and a **chat** model (for example `gpt-4.1-mini`)
+  - an **Azure AI Search** service on the **Basic tier or higher** (the semantic ranker is not on Free)
+  - an **Azure AI Document Intelligence** resource
+  - an **Azure OpenAI** resource with an **embedding** deployment (for example `text-embedding-3-large`) and a **chat** deployment (for example `gpt-4.1-mini`)
 
 ### 2. Install
 
 ```bash
 git clone https://github.com/sherif2004/chat-with-cv.git
 cd chat-with-cv
-pip install -r requirements.txt   # installs into the active conda environment
+pip install -r requirements.txt
 ```
 
-### 3. Add your Azure settings
+`gliner` brings PyTorch; the NER model (1.5 GB) is downloaded the first time a CV is read.
 
-Copy the example file and fill it in (PowerShell: `Copy-Item .env.example .env`):
+### 3. Configure
 
 ```bash
-cp .env.example .env
+cp .env.example .env    # PowerShell: Copy-Item .env.example .env
 ```
 
-| Variable | Where to find it in the Azure portal |
+| Variable | Where to find it |
 |---|---|
-| `AZURE_STORAGE_CONNECTION_STRING` | Storage account, **Security + networking**, **Access keys**, connection string |
-| `AZURE_STORAGE_CONTAINER` | A name prefix you choose, for example `cvs`. Each user gets `<prefix>-<user id>`, created at sign-up |
-| `AZURE_SEARCH_ENDPOINT` | AI Search service, **Overview**, **Url** |
-| `AZURE_SEARCH_KEY` | AI Search service, **Settings**, **Keys**, **Primary admin key** (use the admin key, a query key is read-only) |
-| `AZURE_SEARCH_INDEX` | A name prefix you choose, for example `cvs-index`. Each user gets `<prefix>-<user id>`, created at sign-up |
-| `AZURE_DOCINTEL_ENDPOINT` | Document Intelligence resource, **Keys and Endpoint** |
+| `AZURE_STORAGE_CONNECTION_STRING` | Storage account → Security + networking → Access keys → connection string |
+| `AZURE_STORAGE_CONTAINER` | A name **prefix** you choose, such as `cvs`. Each user gets `<prefix>-<user id>` |
+| `AZURE_SEARCH_ENDPOINT` | AI Search → Overview → Url |
+| `AZURE_SEARCH_KEY` | AI Search → Settings → Keys → **Primary admin key** (a query key is read-only) |
+| `AZURE_SEARCH_INDEX` | A name **prefix**, such as `cvs-index`. Each user gets `<prefix>-<user id>` |
+| `AZURE_DOCINTEL_ENDPOINT` | Document Intelligence → Keys and Endpoint |
 | `AZURE_DOCINTEL_KEY` | Same page, **KEY 1** |
-| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource, **Keys and Endpoint**. Use only `https://<name>.openai.azure.com` |
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI → Keys and Endpoint, only `https://<name>.openai.azure.com` (a trailing `/openai/v1` is removed for you) |
 | `AZURE_OPENAI_API_KEY` | Same page, **KEY 1** |
 | `AZURE_OPENAI_API_VERSION` | Keep `2024-10-21` |
-| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | The **deployment name** of your embedding model (not the model name) |
-| `AZURE_OPENAI_CHAT_DEPLOYMENT` | The **deployment name** of your chat model (not the model name) |
+| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | The **deployment name** of the embedding model (not the model name) |
+| `AZURE_OPENAI_CHAT_DEPLOYMENT` | The **deployment name** of the chat model |
+| `AZURE_OPENAI_SMALL_DEPLOYMENT` | *Optional.* A cheaper deployment (for example `gpt-4o-mini`) that names new chats. Empty: a chat is named after its first question |
+| `DATABASE_URL` | Already filled in for the Docker setup |
 
-`DATABASE_URL` (Postgres) is already filled in for the Docker setup below. `.env` holds secrets and is git-ignored. Never commit it.
+Restart Streamlit after editing `.env`; it is read once at start-up.
 
 ### 4. Run
 
 ```bash
-docker compose up -d      # Postgres for accounts and chats
+docker compose up -d        # Postgres on 127.0.0.1:5432
 streamlit run app.py
 ```
 
-The browser opens automatically. Each user's search index and Blob container are created when they sign up (and checked each time they log in). The first CV also loads the GLiNER model, which is downloaded on first use, so it takes noticeably longer than the next ones.
+Sign up, open the **Library**, drop some CVs, click **Process CVs**, and start chatting.
 
 ---
 
 ## Using the app
 
-1. **Upload.** Open the **Library** (top bar) and drop CVs (PDF or DOCX) into the upload box. **Process CVs** is enabled as soon as you have chosen files, and you can chat as soon as one CV is indexed.
-2. **Process.** Click **Process CVs**. The files are processed in the background, several at a time (as many as the computer has cores, between 2 and 8), and a live status list in the Library refreshes every 2 seconds. Each file shows *waiting*, then the stage it is in (*reading layout*, *reading name, title and experience*, *embedding*, *saving*), then a green check with its chunk count, a grey check if it was already indexed and unchanged, or a red mark and the reason if it failed. A progress bar and a line such as "4 running in parallel · 3 waiting" show the whole batch. You can switch to the chat or the Candidates view meanwhile: the sidebar keeps a small progress bar, and when the last file finishes the CV list updates by itself and a message tells you. **Clear status** removes the finished entries.
-3. **Ask.** Type a question in any language, or click one of the suggested questions on the welcome screen. The answer streams in as it is written, in the language you asked in. While it works, a status box shows what is happening (the router's decision, each search, each agent step).
-4. **Check the sources.** Open **Sources** under an answer to see which CVs it used and the most relevant passage of each.
-5. **Check the details.** Switch on **Details** (its label shows the route and the total time) for tabs with: a *Timeline* of every step with its time and share of the total (router, query expansion, each search, agent rounds and tools, the model's wait for its first word, writing the answer); the *Router* result (class, standalone question, sections searched); every *Search* (query, chunks found, filters, cached or not); the *Agent* rounds and tool calls; the exact *Excerpts used*; and the *Settings* (model deployments, query expansion, answer cache). Details are kept with each message for the whole chat.
-6. **Manage a CV.** The Library lists every CV in a table (file, candidate, job title). Select a row, then:
-   - **Open CV** opens the original file through a one-hour signed link,
-   - **Re-index** queues the stored file for processing again (for example after the pipeline changed) and shows it in the same status list,
-   - **Delete** removes it from Blob Storage and from search, after a confirmation. If it was your last CV, the chat is disabled until you add one.
-   **Update outdated CVs** (above the table) checks every stored CV against the current pipeline and re-indexes only those processed by an older version (the others show as skipped).
-7. **Choose what to chat with.** The **Chat with** button above the conversation picks one or more CVs to answer from. Leave it on "All CVs" to search everything. **Chat with this CV** on a Candidates card sets it for you.
-8. **Start over.** **New chat** starts a new conversation and keeps the old one in your chat list. It does not delete any CVs.
-9. **Browse candidates.** Switch to **Candidates** above the chat to see every CV as a card (see [Candidates view](#candidates-view)).
+| View | What you do there |
+|---|---|
+| **Chat** | Ask in any language. A status box shows each step while it works. Under an answer: **Sources**, **Details**, thumbs up/down, **Copy**, and **Regenerate** on the latest answer (skips the answer cache, keeps the earlier answer). **Chat with** picks which CVs to answer from (default: all). |
+| **Candidates** | One card per CV (name, title, location, email). Filter by text, sort, open the original, **Chat with this CV**, or tick **Compare** on up to three and press **Ask the chat to compare them**. It reads the metadata of the first 1000 chunks, so with very many CVs some cards may lack details. |
+| **Library** | Upload PDF/DOCX and press **Process CVs**. A live table of states (*waiting*, the current stage, a green check with the chunk count, a grey check for skipped, a red mark with the reason). The CV table (file, candidate, title) has **Open CV** (one-hour signed link), **Re-index** and **Delete**. **Update outdated CVs** re-indexes only CVs processed by an older pipeline. **Clear status** removes finished entries. |
 
-Your CVs stay in Azure, so they are still there after you close the app. The Library lists them again the next time you open it.
+**Chats** are saved like in other chat apps. The sidebar has **New chat**, a **Search chats** box (titles and the text of every question and answer, your own chats only), and your chats grouped under *Today / Yesterday / Previous 7 days / Older*. Each chat's ⋮ menu renames it or deletes it after a confirmation. New chats are named by the small model when `AZURE_OPENAI_SMALL_DEPLOYMENT` is set. The model only ever sees the latest messages that fit `HISTORY_CHARS`.
+
+**First run.** Until your first chat the welcome screen shows a three-step checklist and starter questions built from your own CVs (such as "Compare the Engineers" or "Who is based in London?") with no model call.
+
+**What happens on every click.** Streamlit re-runs [`app.py`](app.py) top to bottom: show login until someone is logged in → load settings and connect to Azure (a missing `.env` value shows a clear error) → make sure this user's container and index exist (once per process) → draw the sidebar → draw only the view you picked.
+
+**Interface details.** Light and dark themes follow your system ([`.streamlit/config.toml`](.streamlit/config.toml)); animations are switched off when the system asks for reduced motion; Arabic, Hebrew and other right-to-left text is aligned paragraph by paragraph; the layout works down to phone width. Every empty screen and error says what happened and offers one button for the next step.
 
 ---
 
 ## Project structure
 
-```
+```text
 chat-with-cv/
-├── app.py                    # Streamlit entry point
-├── .env.example              # template for your Azure and Postgres settings
-├── .streamlit/config.toml    # the light and dark theme
-├── docker-compose.yml        # Postgres for accounts and chats
-├── .cache/                   # saved extraction output (created on first run, git-ignored)
-├── requirements.txt          # the packages to install (pip install -r requirements.txt)
+├── app.py                      # Streamlit entry point
+├── docker-compose.yml          # Postgres 16 for accounts and chats
+├── requirements.txt
+├── .env.example                # template for Azure and Postgres settings
+├── .streamlit/config.toml      # light and dark theme
+├── .cache/                     # extraction cache (created on first run, git-ignored)
 └── cv_chat/
-    ├── config.py             # reads .env and holds all settings
-    ├── db.py                 # Postgres connection and tables (users, sessions, chats)
-    ├── auth.py               # sign up, log in, sessions, change password, delete user
-    ├── history.py            # saved chats, always scoped to one user
-    ├── workspace.py          # one user's container and index names, passed to every Azure call
-    ├── services/             # one small file per Azure service
-    │   ├── blob_storage.py       # store and list CV files
-    │   ├── search_index.py       # create the index, save chunks, hybrid + semantic search
-    │   └── openai_service.py     # batched embeddings, chat answers, streaming
-    ├── processing/           # no Azure
-    │   ├── extract.py            # Document Intelligence: PDF / DOCX to pages and headings (cached)
-    │   ├── chunking.py           # pages to section-based chunks
-    │   ├── entities.py           # the generic NER (GLiNER): name, title, email, phone, location
-    │   └── sections.py           # heading to standard section type
-    ├── rag/                  # the two pipelines
-    │   ├── cache.py              # in-memory cache of router results, searches and answers
-    │   ├── metadata.py           # how a CV's details are shown to the model and the agent
-    │   ├── trace.py              # what happened while one question was answered, with timings
-    │   ├── agent.py              # tool-using agent for complex questions (capped rounds and time)
-    │   ├── ingest.py             # upload flow: skip check, extract, chunk, embed, save; delete
-    │   ├── jobs.py               # background queue: runs CVs in parallel and tracks each file's state
-    │   ├── qa.py                 # question flow: route, expand, search or agent, stream answer, cache
-    │   └── retrieval.py          # embed, hybrid search, rank fusion, top-p selection, excerpt formatting
-    └── ui/                   # Streamlit screens
-        ├── accounts.py           # login and sign-up screen, session cookie, account menu
-        ├── candidates.py         # the Candidates view: cards, filters, compare
-        ├── suggestions.py        # starter questions built from the CVs
-        ├── states.py             # the shared look of empty and error messages
-        ├── chats.py              # the chat list: search, grouping by age, open, rename, delete
-        ├── sidebar.py            # the sidebar: chat list and a progress bar while CVs are processed
-        ├── library.py            # the Library: upload, progress, the table of CVs, open / re-index / delete
-        ├── style.py              # adds the stylesheet to every page
-        ├── chat.py               # conversation and sources
-        ├── details.py            # the Details panel: route, timeline, searches, agent, excerpts
-        ├── safe.py               # escapes CV text and strips images before anything is drawn
-        └── styles.css            # animations, right-to-left text, welcome and login styling
+    ├── config.py               # .env values + all tunables
+    ├── db.py                   # Postgres pool and schema
+    ├── auth.py                 # sign-up, login, sessions, recovery code, password change, delete user
+    ├── history.py              # saved chats and feedback, always scoped to one user
+    ├── workspace.py            # one user's container and index names, passed to every Azure call
+    ├── services/               # Azure, one file per service
+    │   ├── blob_storage.py         # store, list, delete, signed read links
+    │   ├── search_index.py         # index schema, upload, hybrid + semantic search, profile queries
+    │   └── openai_service.py       # adaptive embeddings, chat, streaming, tool calls, chat titles
+    ├── processing/             # file to pages, chunks and details
+    │   ├── extract.py              # Document Intelligence: PDF/DOCX to pages + headings (disk-cached)
+    │   ├── chunking.py             # pages to section-based chunks
+    │   ├── sections.py             # heading to standard section type
+    │   └── entities.py             # GLiNER: name, title, email, phone, location
+    ├── rag/                    # the two pipelines
+    │   ├── ingest.py               # skip check, extract, chunk, embed, save, delete, prepare, destroy
+    │   ├── jobs.py                 # background queue, per-file state
+    │   ├── qa.py                   # router, expansion, role check, retrieval, agent, guarded streaming
+    │   ├── retrieval.py            # embed, hybrid search, RRF, top-p, top-k, excerpt formatting
+    │   ├── agent.py                # tool-using agent for complex questions
+    │   ├── roles.py                # does a requested job role exist in the CVs?
+    │   ├── metadata.py             # how a CV's details are shown to the model
+    │   ├── cache.py                # per-user in-memory cache with invalidation tokens
+    │   └── trace.py                # timed record of one answer, for the Details panel
+    └── ui/                     # Streamlit screens
+        ├── accounts.py             # login, sign-up, recovery, cookie, account menu
+        ├── sidebar.py  chats.py    # chat list, search, rename, delete, ingest progress bar
+        ├── chat.py  details.py     # conversation, sources, feedback; Details panel
+        ├── candidates.py           # cards, filters, compare
+        ├── library.py              # upload, live status, CV table
+        ├── suggestions.py          # starter questions from the CVs
+        ├── states.py  safe.py      # empty/error states; escaping of untrusted text
+        ├── style.py  styles.css    # stylesheet injection; animations, RTL, welcome and login styling
+        ├── profile.py              # optional per-page timing (CV_PROFILE=1)
+        └── assets/                 # logo.svg, icon.png
 ```
-
-The code is split so each part has one job and imports only what is below it:
-
-```mermaid
-flowchart TD
-    app["app.py"] --> ui["ui/"]
-    ui --> rag["rag/"]
-    rag --> services["services/<br/>Azure"]
-    rag --> processing["processing/<br/>pure Python"]
-    services --> config["config.py"]
-```
-
-- `services/` talks to Azure and nothing else. Each file wraps one service.
-- `processing/` never touches Azure or Streamlit, so it can be tested on its own. (`extract.py` needs the Document Intelligence package and `entities.py` needs GLiNER, but nothing else.)
-- `rag/` combines the two into the upload and question pipelines. It never imports Streamlit.
-- `ui/` only draws screens and calls `rag/`.
 
 ---
 
 ## Configuration
 
-Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). Everything else is a constant in [cv_chat/config.py](cv_chat/config.py):
+Azure values come from `.env`. Everything else is a constant in [`cv_chat/config.py`](cv_chat/config.py):
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `CHUNK_SIZE` | `1500` | Longest chunk in characters. A section shorter than this stays one chunk |
+| `CHUNK_SIZE` | `1500` | Longest chunk in characters; a shorter section stays one chunk |
 | `CHUNK_OVERLAP` | `300` | Characters shared between pieces of a long section (20%) |
-| `EXTRACT_CACHE_DIR` | `.cache/extracted` | Where the extraction output is saved |
-| `CONTEXT_CHARS` | `36000` | The most CV text sent to the chat model for one question (about 9,000 tokens). Excerpts are added in order of relevance until it is used up, so this one number replaces separate limits on CVs and excerpts. The agent's tools use half of it each |
-| `HISTORY_CHARS` | `6000` | The most recent chat sent along with a question. As many of the latest messages as fit are used |
-| `RETRIEVE_K` | `50` | Chunks fetched and re-ranked per search, then grouped by candidate (50 is the semantic ranker's limit) |
-| `TOP_K` | `20` | Most candidates a question about everyone (a comparison, a ranking, a list) covers. Each gets an equal share of `CONTEXT_CHARS`. The router decides when a question is about everyone; those use top-k instead of top-p |
-| `COVER_ROUNDS` | `3` | Extra searches, aimed at the CVs the first search missed, so a question about everyone reaches every candidate |
-| `TOP_P` | `0.8` | Share of the relevance that the kept CVs, and the kept excerpts of each, must cover. Higher sends more, lower sends less |
-| `EXPANDED_QUERIES` | `2` | Alternative queries searched when **Query expansion** is on |
-| `RRF_K` | `60` | The standard constant of reciprocal rank fusion (from the original paper), used to merge the searches. Leave it |
-| `CACHE_SIZE` | `256` | Entries kept per kind of cached result (router, search, answer) |
-| `NER_MODEL` | `"urchade/gliner_medium-v2.1"` | The generic NER model that reads name, title, email, phone and location. `urchade/gliner_small-v2.1` (611 MB) is faster but much less accurate |
-| `AGENT_MAX_ROUNDS` | `5` | Tool rounds the agent may take for one complex question |
-| `AGENT_MAX_SECONDS` | `30` | Time budget for those rounds, then it answers with what it found |
-| `EMBED_CACHE_SIZE` | `256` | Query embeddings kept in memory |
+| `CONTEXT_CHARS` | `36000` | Most CV text sent to the chat model for one question (about 9,000 tokens). Excerpts are added by relevance until it is used; the agent's tools use half of it each |
+| `HISTORY_CHARS` | `6000` | Most recent chat sent along with a question; as many of the latest messages as fit |
+| `RETRIEVE_K` | `50` | Chunks fetched and re-ranked per search (the semantic ranker's limit) |
+| `TOP_P` | `0.8` | Share of the relevance the kept CVs, and the kept excerpts of each, must hold |
+| `TOP_K` | `20` | Most candidates a question about everyone covers; each gets an equal share of `CONTEXT_CHARS` |
+| `COVER_ROUNDS` | `3` | Extra searches aimed at CVs the first search missed |
+| `EXPANDED_QUERIES` | `2` | Alternative queries when **Query expansion** is on |
+| `RRF_K` | `60` | Reciprocal rank fusion constant (from the original paper). Leave it |
+| `AGENT_MAX_ROUNDS` | `5` | Tool rounds the agent may take |
+| `AGENT_MAX_SECONDS` | `30` | Time budget for those rounds |
+| `CACHE_SIZE` | `256` | Entries per kind of cached result (router, search, answer, chat) |
+| `EMBED_CACHE_SIZE` | `256` | Question embeddings kept in memory |
+| `EXTRACT_CACHE_DIR` | `.cache/extracted` | Where extraction output is saved |
+| `NER_MODEL` | `urchade/gliner_medium-v2.1` | The NER model. `gliner_small-v2.1` (611 MB) is faster but much less accurate |
 
-The search index settings (text analyzer `en.microsoft`, field weights, boosted sections) are constants at the top of [cv_chat/services/search_index.py](cv_chat/services/search_index.py). Changing them needs a new index (see Troubleshooting).
+Index-level settings (analyzer `en.microsoft`, field weights, boosted sections `experience` and `skills`) are constants at the top of [`services/search_index.py`](cv_chat/services/search_index.py); changing them needs a new index. Environment variables read elsewhere: `DATABASE_URL` and `CV_PROFILE`.
+
+---
+
+## Caching
+
+Everything is **in memory, per user, per app process** ([`rag/cache.py`](cv_chat/rag/cache.py)): empty after a restart, not shared between copies of the app.
+
+| Cache | Key | Notes |
+|---|---|---|
+| **Router results** | question + recent chat | A `chat` decision on a message that opens a chat is also stored by its text alone; decisions made with a history are never shared |
+| **Chat replies** ("hi", "thanks") | message text | Always on. Written without chat history, so nothing can leak between conversations |
+| **Searches** | query + sections + CV filter + metadata filter | Repeats skip Azure and do not use the semantic ranker quota |
+| **Final answers** | question + recent chat + expansion flag + scope | **Opt-in** (account menu), because a cached answer can be out of date. Clarifying questions are never reused |
+| **Query embeddings** | query text | `lru_cache`, `EMBED_CACHE_SIZE` |
+
+**Invalidation.** The user's whole cache is cleared whenever a CV is processed, re-indexed or deleted. Each `put` carries a **generation token** taken before computing; if the cache was cleared in between, the value is dropped, so a result computed while a CV was changing is never stored.
+
+---
+
+## Observability
+
+Every answer records a [`Trace`](cv_chat/rag/trace.py): the router result, query expansion, each search (query, hits, filters, cached or not, embed time), each agent round and tool call, content-filter events, the wait for the first token and the time to write the answer. It is stored with the message in Postgres and shown in the **Details** panel: *Timeline* (every step with its time and share of the total; parallel searches overlap, so shares can exceed 100%), *Router*, *Searches*, *Agent*, *Excerpts used* and *Settings*.
+
+To see where time goes in the UI itself, start with `CV_PROFILE=1 streamlit run app.py` (PowerShell: set `$env:CV_PROFILE=1` first). The terminal then prints one line per page run, such as `page run 1830 ms | login check 4 | imports 1210 | prepare workspace 590 | sidebar 18 | view: Chat 12`. Without it nothing is measured.
 
 ---
 
 ## Good to know
 
-- **Uploading the same file again is cheap.** If the content has not changed it is skipped. If it has, its chunks are replaced and any leftover chunks from the old version are deleted.
-- **Same CV under a different file name counts as a different CV.** `cv.pdf` and `cv (1).pdf` are stored separately.
-- **After changing extraction or chunking code or settings**, click **Update outdated CVs** (in the Library), or **Process CVs** with the files again. The change is detected automatically and the CVs are re-indexed, even though the files are unchanged; CVs already up to date are skipped. (Any edit to `extract.py`, `chunking.py`, `sections.py` or `entities.py`, even a comment, counts as a change.)
-- **Using an index from an older version of the app:** delete it in the Azure portal (each user's index is named `<AZURE_SEARCH_INDEX>-<user id>`) and process the CVs again. Azure cannot change an analyzer, a field's filterable flag or the vector metric on an existing index, so the app stops at start-up with a message that names what is outdated. After recreating it, click **Update outdated CVs** to index the stored CVs again.
-- **The first CV used to be slow; now the wait is hidden.** Extraction is done by Azure, so it needs no local models; the GLiNER name/title reader is loaded in the background the first time you open the **Library**.
-- **Delete is permanent.** It removes the original file from Blob Storage and the CV from the index.
-- **Scanned PDFs go through OCR**, which is slower than reading a text PDF. A PDF with no readable text at all is reported as "No text found".
-- **DOCX files have no page numbers**, so their chunks are stored as page 1.
-- **Every question makes a router call** before the search, which adds a little time before the answer starts streaming. Query expansion adds one more call and two more searches. A complex question can take several model calls, often 10 to 30 seconds.
-- **Specific questions send only the relevant CVs** (top-p, within the `CONTEXT_CHARS` text budget). A question the router reads as about everyone (compare, rank or list the candidates) uses top-k instead: up to `TOP_K` CVs, an equal share of the text each, with extra searches for the CVs the first one missed. With more than `TOP_K` CVs it keeps the best `TOP_K`.
-- **The search is built for English CVs.** The keyword analyzer is English, and the router writes the search query in English. Questions can be in any language, but CVs in another language would need another analyzer and a new index.
-- **Years of experience are not read.** A generic NER cannot work them out (see step 4 above), so the app does not show or filter by them. If you need them, they would have to come from a model that reads the whole CV.
-- **Contact details are personal data.** Email, phone and location are stored as fields in the search index, next to the CV text. Anyone with the search key can read them.
-- **Each user sees only their own CVs and chats.** Sign-up is open to anyone who can reach the app (until the 15-user cap), so put the app behind your own access control, and HTTPS, before using real candidate data.
-- **The caches live in the memory of the app process.** They are empty after a restart and are not shared between several copies of the app. Each user has their own cache, shared by that user's browser sessions. Entries that depend on a conversation (router results, final answers) include the recent chat in their key, so only an identical conversation can reuse them.
-- **The embedding size is read from your embedding model** when the index is first created, and cannot be changed on an existing index. To switch to a model with a different size, delete each user's index in the Azure portal and process the CVs again.
-- **Restart Streamlit after editing `.env`.** The file is read once at startup.
-
----
-
-## Chat features in detail
-
-The reasoning, limits and costs behind each part of the chat side.
-
-### Router and citations
-
-- **Router.** One model call classifies each message as *chat* (greetings, thanks, off-topic: no search), *simple* (one search), *complex* (handled by the agent) or *clarify* (it asks you for the missing detail), reads the job role if you asked for one, and rewrites it into a standalone English search query. It is the same call that picks the CV sections, so it adds no second call.
-- **Inline citations.** Answers cite their evidence as `[file name, p.N]` next to each claim, using the page number stored with every chunk. When comparing candidates, each gets their own heading.
-- *Why:* no wasted searches on "hi" or "thanks", and every claim can be traced to a CV and page.
-
-### Query expansion
-
-- The question is expanded into two alternative search queries (one keyword-style, one worded the way a CV would say it). Each runs the usual hybrid search with semantic re-ranking, and the lists are merged with reciprocal rank fusion. A switch in the account menu (Chat settings) turns it on and off.
-- *Why:* CVs word the same thing differently ("built APIs" versus "REST services"), so one query can miss relevant chunks.
-- *Cost:* one more model call and three searches per question, so answers start about 1 to 2 seconds later. Each search uses the semantic ranker, which has a monthly query quota on lower tiers.
-
-### Agent for complex questions
-
-- Questions the router marks *complex* go to a capped tool-using agent with three tools:
-  - `list_cvs` returns every CV with its candidate name and job title,
-  - `search_cvs` searches, optionally limited to some CVs, filtered by `job_title`, with `per_cv` to see more of each CV (one excerpt per CV by default, within a text budget, so one search reaches many CVs),
-  - `get_cv` reads a whole CV.
-- It plans its searches, retries with different wording and answers only from what the tools returned. Its steps are shown while it works, and its answer streams.
-- Limits: at most 5 rounds and about 30 seconds. When the budget is used up it answers from what it has found. If the agent fails it falls back to a single search.
-- There is no location filter: the location field is stored but not filterable in the index.
-- *Why:* ranking or counting needs more than the few best chunks, for example "who has the most experience?".
-- *Cost:* several model calls, often 10 to 30 seconds per complex question. Simple questions are not affected.
-
-### Caching
-
-- **Router results** are cached per question and recent chat, so asking again skips that model call. A message that opens a chat and that the router classifies as *chat* ("hi", "thanks") is also cached by its text alone, so it is recognised again later in any chat. Decisions made with a chat history are never shared this way.
-- **Chat replies** to such messages are cached by their text alone (always on), so saying "hi" again makes no model call at all. These replies are written without the chat history, so nothing from one conversation can reach another.
-- **Search results** are cached per query, section filter and CV filter, so repeats skip the searches and do not use the semantic ranker quota again.
-- **Final answers** can optionally be cached too, only for an identical question with identical chat history (a setting in the account menu, off by default).
-- **Invalidation.** The whole cache is cleared whenever a CV is processed, re-indexed or deleted, so answers never cite a CV that was removed or changed. A result computed while a CV was changing is not stored. **Clear cache** (account menu, Chat settings) clears your own cache by hand.
-- The cache is in memory, per app process. The in-memory cache of query embeddings (`EMBED_CACHE_SIZE`) is separate.
-
-### Search boosts and CV metadata
-
-Keyword matching uses a scoring profile (`cv`): a match in the candidate name counts 3 times as much as the same words in the body text, job title and file name 2 times, the section heading 1.5 times, and chunks from the *experience* and *skills* sections get a further boost. The semantic ranker then re-orders the best results as before. The keyword analyzer is English (`en.microsoft`), and the section headings are searchable. The details (name, title, contact, location) are read once per CV at upload time by the generic NER (no rules, no Azure call) and stored on every chunk.
-
-### Answer language
-
-The answer, the greeting reply and the agent's answer use the language of your latest message. The search itself runs in English. File names, candidate names, job titles, technical terms and citations stay as written in the CVs. A few fixed messages (the content-filter note) and all buttons and labels stay in English.
-
-### Safety
-
-CV text is written by third parties and is treated as data, not as instructions:
-
-- **Prompts.** Excerpts and the agent's CV list are wrapped in `<cv_excerpt>` tags, tags inside CV text are removed repeatedly (so a split tag cannot rebuild a closing tag), and the system prompts say to never follow instructions found inside them.
-- **Extracted details** have angle brackets removed and are cut to a short length.
-- **Azure's jailbreak filter.** If it refuses a request because of an excerpt, the app finds the flagged excerpt by halving the list, answers from the rest and adds a note naming the CV. It does not fail every question that retrieves that CV.
-- **Drawing.** Text from CVs, file names and models is escaped before it is shown (so `![x](https://...)` cannot load an image), and image syntax in an answer is turned into a plain link. Links in answers are still clickable.
-
-### Latency and the Details dropdown
-
-Every answer records a trace: the router result, query expansion, each search (cached or not, with its filters), each agent round and tool call, the wait before the model's first word, and the time to write the answer. The **Details** dropdown shows it. Searches that run in parallel overlap, so the shares in the timeline can add up to more than 100%.
-
-What stays as it is: the section filter, streamed answers, and delete and re-index.
+- **Uploading the same file again is cheap**: unchanged content is skipped; changed content replaces its chunks and removes leftovers.
+- **After changing extraction, chunking, section or NER code or settings**, click **Update outdated CVs**. The change is detected by the fingerprint; CVs already current are skipped.
+- **Clear `.cache/extracted`** if you switch extraction engines, otherwise old output is reused for the same file content.
+- **DOCX has no real pages** here, so its chunks are stored as page 1. Scanned PDFs go through OCR (slower); a file with no readable text is reported as "No text found (scanned PDF?)".
+- **The search is built for English CVs.** The analyzer is English and the router writes the search query in English. Questions can be in any language; CVs in another language would need another analyzer and a new index.
+- **Years of experience are not read**; the app does not show or filter by them.
+- **NER accuracy.** On 8 real CVs it found a name, title, email and phone for all 8 and a location for 6, but some answers are wrong: check the Candidates view after uploading. On CPU it takes about 8 seconds per CV; a GPU is used automatically when its kernels are available.
+- **The embedding size is fixed on an index** when it is created. To switch to a model with another size, delete each user's index in the Azure portal and re-process.
+- **Cost and latency.** Every question makes one router call before the search. Query expansion adds one call and two searches (answers start 1 to 2 s later). A complex question can take several model calls, often 10 to 30 s. Document Intelligence is billed per page.
+- **Delete is permanent**: it removes the original from Blob Storage and the CV from the index.
+- **Starting from an older version of the app** (shared container and index, before per-user resources): re-upload the CVs from a user account, then delete the old container and index in the portal.
 
 ---
 
 ## Troubleshooting
 
-Most problems now show a message that says what to check. These are the ones you may still meet:
-
 | What you see | What it means and what to do |
 |---|---|
-| `Wrong email or recovery code.` on Forgot password | The email or code is wrong, or the code was already used (each reset issues a new one). Check you are using the newest code. Accounts without a code cannot be reset: log in with the password and get a code from the account menu |
-| `Could not reach Postgres` on the login screen | Postgres is not running. Start it with `docker compose up -d` and reload the page |
-| `Could not set up your storage, so the account was not created` | Azure refused to create the new user's container or search index (check the Azure values in `.env` and the index limit of your search tier). Nothing was created, so you can try again |
-| `Your session has ended. Log in again.` | Your session was ended elsewhere (you logged out, changed your password or deleted the account on another device) or it expired after 14 days. Log in again |
-| `The NER model '...' could not be loaded` when a CV is processed | The GLiNER package or its model is not available. Run `pip install -r requirements.txt` again and check the internet connection (the 1.5 GB model is downloaded the first time, which can take many minutes). There is no fallback: the CV is reported as failed until the model loads |
-| `Missing 'AZURE_...' in .env` | Lists every empty or missing value at once. Copy `.env.example` to `.env`, fill them in and restart the app |
-| `The index '...' was made by an older version` | The index settings changed (English text analyzer, filterable file names, explicit cosine metric, CV metadata fields, a scoring profile, searchable section headings) and Azure cannot change these in place. Delete the user's index in the Azure portal, restart the app, then open the Library and click **Update outdated CVs** to index the stored CVs again |
-| `Could not connect to Azure` at start-up | A value in `.env` is malformed, most often the storage connection string. Copy it again from the portal |
-| `Azure OpenAI has no deployment named '...'` | Use the **deployment name** (not the model name) exactly as in the portal. The endpoint is cleaned up for you (a trailing `/openai/v1` is removed), but the API version must look like `2024-10-21` |
-| `The index '...' stores vectors of length N` | The index was created with another embedding model. Delete the index in the Azure portal, then process the CVs again |
-| `Could not prepare the search index: ... older version` | See the row above: delete the index (or use a new name), restart, and click **Update outdated CVs** |
-| A note says excerpts from a CV *were left out because Azure's content safety filter flagged them* | Azure's jailbreak detection saw something that looks like an instruction in that CV's text. The answer used the other excerpts. Check the CV; the app keeps working |
-| `Could not answer: ...` under a question | The model call failed (a wrong deployment name, a rate limit, a network error). The message says why. Try again |
-| `No text found (scanned PDF?)` | OCR ran and still found nothing: the file is blank or the image is unreadable. Try a clearer copy |
-| `Could not list the CVs` in the Library | The storage connection string or container name is wrong, or the storage account is not reachable |
+| `Missing 'AZURE_...' in .env` | Lists every empty or missing value at once. Copy `.env.example`, fill them in, restart |
+| `Could not connect to Azure` at start-up | A value in `.env` is malformed, most often the storage connection string |
+| `Could not reach Postgres` on the login screen | Start it with `docker compose up -d` and reload |
+| `Could not set up your storage, so the account was not created` | Azure refused to create the user's container or index (check `.env` and your search tier's index limit). Nothing was created, so try again |
+| `Your session has ended. Log in again.` | It was ended elsewhere (logout, password change, deletion) or expired after 14 days |
+| `Wrong email or recovery code.` | Wrong email, or the code was already used (each reset issues a new one). Accounts without a code can log in with the password and create one in the account menu |
+| `The NER model '...' could not be loaded` | GLiNER or its model is unavailable. Run `pip install -r requirements.txt` again and check the connection (1.5 GB first download). There is no fallback: the CV fails until the model loads |
+| Document Intelligence errors when a CV is processed | Check `AZURE_DOCINTEL_ENDPOINT` and `AZURE_DOCINTEL_KEY`, and that the resource's pricing tier allows the file size |
+| `The index '...' was made by an older version` | Index settings changed (analyzer, filterable file names, cosine metric, metadata fields, scoring profile) and Azure cannot change them in place. Delete the user's index in the portal, restart, then click **Update outdated CVs** |
+| `The index '...' stores vectors of length N` | The index was created with another embedding model. Delete it and re-process |
+| `Azure OpenAI has no deployment named '...'` | Use the **deployment name** exactly as in the portal; the API version must look like `2024-10-21` |
+| A note says excerpts from a CV *were left out because Azure's content safety filter flagged them* | Azure saw something instruction-like in that CV. The answer used the rest; check the CV |
+| `Could not answer: ...` under a question | The model call failed (deployment name, rate limit, network). The message says why. Try again |
+| `No text found (scanned PDF?)` | OCR still found nothing: blank file or unreadable image. Try a clearer copy |
+| `Could not list the CVs` in the Library | Wrong storage connection string or container name, or the account is unreachable |
 | **Process CVs** is greyed out | No files are chosen yet |
 | The chat input is disabled | By design: there are no CVs yet. Add some in the Library |
 
-If the search service has no semantic ranker (Free tier, or it is switched off), the app does not fail: it logs a warning and answers with plain hybrid search. Answers are less precisely ranked and Sources show the start of each chunk instead of the best passage.
+Without a semantic ranker (Free tier or switched off) the app does not fail: it logs a warning and answers with plain hybrid search; answers are less precisely ranked and Sources show the start of each chunk.
 
 ---
 
-## Run the pipeline without the UI
+## Running the pipelines without the UI
 
-Handy for debugging. Everything works on one user's data, so you need a user id:
+Everything works on one user's data, so you need a user id:
 
 ```bash
 docker compose exec postgres psql -U cvchat -c "select id, email from users"
 ```
 
-Put some CVs in a local `cvs/` folder (it is git-ignored) and run (replace `<user id>`):
+Index a folder of CVs (it is git-ignored as `cvs/`). Replace `<user id>`:
 
 ```bash
 python -c "from pathlib import Path; from cv_chat.workspace import Workspace; from cv_chat.rag import ingest; ws = Workspace('<user id>'); ingest.prepare(ws); [print(p.name, ingest.process_cv(ws, p.name, p.read_bytes())) for p in Path('cvs').iterdir()]"
 ```
 
-Each CV prints its chunk count and whether it was skipped as unchanged, or the error that stopped it.
-
-To ask a question the same way, without the UI:
+Each CV prints `(chunks, skipped)` or the error that stopped it. Ask a question the same way:
 
 ```bash
 python -c "from cv_chat.workspace import Workspace; from cv_chat.rag import qa; a = qa.ask(Workspace('<user id>'), 'Who knows Kubernetes?', []); print(''.join(a.stream)); print(a.route, a.trace.to_dict()['total_ms'], 'ms')"
