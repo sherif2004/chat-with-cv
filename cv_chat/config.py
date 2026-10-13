@@ -28,6 +28,10 @@ SEARCH_ENDPOINT = _env("AZURE_SEARCH_ENDPOINT")
 SEARCH_KEY = _env("AZURE_SEARCH_KEY")
 SEARCH_INDEX = _env("AZURE_SEARCH_INDEX")
 
+# Azure AI Document Intelligence (reads the CV layout)
+DOCINTEL_ENDPOINT = _env("AZURE_DOCINTEL_ENDPOINT")
+DOCINTEL_KEY = _env("AZURE_DOCINTEL_KEY")
+
 # Azure OpenAI
 # Only the resource address is wanted: a pasted "/openai/v1" or trailing slash would give 404s.
 OPENAI_ENDPOINT = re.split(r"/openai\b", _env("AZURE_OPENAI_ENDPOINT"))[0].rstrip("/")
@@ -52,7 +56,7 @@ TOP_K = 20  # most candidates a question about everyone (a comparison or ranking
 COVER_ROUNDS = 3  # extra searches, aimed at the CVs the first search missed, to reach every candidate of such a question
 EXPANDED_QUERIES = 2  # alternative queries searched next to the main one when query expansion is on
 RRF_K = 60  # reciprocal rank fusion constant: higher flattens the difference between ranks
-EXTRACT_CACHE_DIR = ".cache/extracted"  # Docling output per file, so re-chunking skips the slow step
+EXTRACT_CACHE_DIR = ".cache/extracted"  # Document Intelligence output per file, so re-chunking skips the service call
 CACHE_SIZE = 256  # entries kept per kind of cached result (router, search, answer)
 EMBED_CACHE_SIZE = 256  # question embeddings kept in memory
 AGENT_MAX_ROUNDS = 5  # tool-using rounds the agent may take for one complex question

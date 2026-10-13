@@ -33,7 +33,7 @@ def cv_names(ws: Workspace) -> list[str]:
 
 
 def render(ws: Workspace, cvs: list[str]) -> None:
-    extract.warm_up_in_background()  # people who open the Library are about to process CVs: load the models meanwhile
+    extract.warm_up_in_background()  # people who open the Library are about to process CVs: load the NER model meanwhile
     st.markdown("#### Library")
     st.caption(f"{len(cvs)} CV{'' if len(cvs) == 1 else 's'} indexed")
 

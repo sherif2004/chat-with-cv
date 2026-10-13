@@ -1,25 +1,18 @@
-"""Layout-aware extraction with Docling: reading order across columns, headings, tables. Handles PDF and DOCX."""
+"""Layout-aware extraction with Azure Document Intelligence (prebuilt-layout): reading order across columns, headings, tables. Handles PDF and DOCX."""
 import hashlib
-import io
 import json
 import logging
-import os
 import threading
 from pathlib import Path
 from collections import defaultdict
 from dataclasses import dataclass
 
-# torch.compile adds ~40 s to the first conversion for no benefit on one-off CV pages.
-# Must be set before torch is imported.
-os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
-
-# Docling (and PyTorch behind it) takes many seconds to import, so it is imported inside the functions that need it:
-# the app starts and answers questions without it, and only reading a CV loads it.
-
 from cv_chat import config
 
 log = logging.getLogger(__name__)
 SUPPORTED = (".pdf", ".docx")
+_HEADING_ROLES = ("title", "sectionHeading")
+_SKIPPED_ROLES = ("pageNumber", "pageFooter")  # repeated on every page, not CV content
 
 
 @dataclass(frozen=True)
@@ -30,31 +23,23 @@ class ExtractedCV:
     headers: list[str]
 
 
-_lock = threading.Lock()  # the layout models are not thread-safe: one conversion at a time
 _lock_for_flag = threading.Lock()
-_converter = None  # a docling DocumentConverter, once loaded
+_client = None  # a DocumentIntelligenceClient, created on first use
 _warm_up_started = False
 
 
-def _get_converter():
-    """Loaded on first use (the first call downloads/loads the models). Call with _lock held."""
-    global _converter
-    if _converter is None:
-        from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import AcceleratorOptions, PdfPipelineOptions
-        from docling.document_converter import DocumentConverter, PdfFormatOption
+def _get_client():
+    global _client
+    if _client is None:
+        from azure.ai.documentintelligence import DocumentIntelligenceClient
+        from azure.core.credentials import AzureKeyCredential
 
-        options = PdfPipelineOptions(
-            do_ocr=True,  # scanned PDFs and text inside images
-            accelerator_options=AcceleratorOptions(),  # its default is to pick a GPU when there is one, otherwise the CPU
-        )
-        _converter = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)})
-        _converter.initialize_pipeline(InputFormat.PDF)
-    return _converter
+        _client = DocumentIntelligenceClient(config.DOCINTEL_ENDPOINT, AzureKeyCredential(config.DOCINTEL_KEY))
+    return _client
 
 
 def extract_cv(file_name: str, data: bytes) -> ExtractedCV:
-    """Docling output, cached on disk by file content: changing the chunking never re-runs the layout models."""
+    """Azure Document Intelligence output, cached on disk by file content: changing the chunking never calls the service again."""
     if not file_name.lower().endswith(SUPPORTED):
         raise ValueError(f"Unsupported file type: {file_name} (expected PDF or DOCX)")
     cache_file = Path(config.EXTRACT_CACHE_DIR) / f"{hashlib.md5(data).hexdigest()}.json"
@@ -75,14 +60,14 @@ def extract_cv(file_name: str, data: bytes) -> ExtractedCV:
 
 
 def warm_up_in_background() -> None:
-    """Start loading Docling and its models in a background thread, once per process, so the first CV does not wait for them.
+    """Start loading the NER model in a background thread, once per process, so the first CV does not wait for it.
     Called when the Library is first opened; people who only chat never pay for it."""
     global _warm_up_started
     with _lock_for_flag:
         if _warm_up_started:
             return
         _warm_up_started = True
-    threading.Thread(target=_warm_up, name="docling-warm-up", daemon=True).start()
+    threading.Thread(target=_warm_up, name="ner-warm-up", daemon=True).start()
 
 
 def _warm_up() -> None:
@@ -90,33 +75,52 @@ def _warm_up() -> None:
         from cv_chat.processing import entities
 
         entities.warm_up()  # the NER model (downloaded the first time)
-        with _lock:
-            _get_converter()
-        log.info("docling is loaded")
     except Exception as error:  # the first CV will try again and report the real problem
-        log.warning("could not preload docling: %s", str(error).splitlines()[0] if str(error) else type(error).__name__)
+        log.warning("could not preload the NER model: %s", str(error).splitlines()[0] if str(error) else type(error).__name__)
+
+
+def _table_markdown(table) -> str:
+    rows: dict[int, dict[int, str]] = defaultdict(dict)
+    for cell in table.cells:
+        rows[cell.row_index][cell.column_index] = " ".join((cell.content or "").split()).replace("|", "/")
+    width = table.column_count
+    lines = ["| " + " | ".join(row.get(c, "") for c in range(width)) + " |" for _, row in sorted(rows.items())]
+    if len(lines) > 1:
+        lines.insert(1, "|" + " --- |" * width)
+    return "\n".join(lines)
 
 
 def _convert(file_name: str, data: bytes) -> ExtractedCV:
-    from docling.datamodel.base_models import DocumentStream
-    from docling_core.types.doc import DocItemLabel, TableItem
+    from azure.ai.documentintelligence.models import AnalyzeDocumentRequest
 
-    with _lock:
-        document = _get_converter().convert(DocumentStream(name=file_name, stream=io.BytesIO(data))).document
+    result = _get_client().begin_analyze_document("prebuilt-layout", AnalyzeDocumentRequest(bytes_source=data)).result()
+
+    # (offset in the document text, page, text, is a heading): sorting by offset gives reading order
+    items: list[tuple[int, int, str, bool]] = []
+    table_spans: list[tuple[int, int]] = []
+    for table in result.tables or []:
+        if not table.spans or not table.bounding_regions:
+            continue
+        table_spans.append((table.spans[0].offset, table.spans[0].offset + table.spans[0].length))
+        items.append((table.spans[0].offset, table.bounding_regions[0].page_number, _table_markdown(table), False))
+    for paragraph in result.paragraphs or []:
+        if paragraph.role in _SKIPPED_ROLES or not paragraph.spans:
+            continue
+        offset = paragraph.spans[0].offset
+        if any(start <= offset < end for start, end in table_spans):
+            continue  # already part of the table
+        page = paragraph.bounding_regions[0].page_number if paragraph.bounding_regions else 1
+        items.append((offset, page, " ".join(paragraph.content.split()), paragraph.role in _HEADING_ROLES))
 
     lines: dict[int, list[str]] = defaultdict(list)
     headers: list[str] = []
-    for item, _ in document.iterate_items():
-        page = item.prov[0].page_no if item.prov else 1  # DOCX has no pages
-        if isinstance(item, TableItem):
-            text = item.export_to_markdown(doc=document)
-        else:
-            text = " ".join(getattr(item, "text", "").split())
-            if getattr(item, "label", None) == DocItemLabel.SECTION_HEADER and text:
-                headers.append(text)
-        if text.strip():
-            lines[page].append(text)
+    for _, page, text, is_heading in sorted(items, key=lambda item: item[0]):
+        if not text.strip():
+            continue
+        if is_heading:
+            headers.append(text)
+        lines[page].append(text)
 
     pages = [(page, "\n".join(texts)) for page, texts in sorted(lines.items())]
-    log.info("docling: %s -> %d page(s), %d header(s)", file_name, len(pages), len(headers))
+    log.info("document intelligence: %s -> %d page(s), %d header(s)", file_name, len(pages), len(headers))
     return ExtractedCV(pages=pages, headers=headers)

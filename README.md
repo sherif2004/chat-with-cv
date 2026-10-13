@@ -62,7 +62,7 @@ This is a standard "chat with your documents" design, also called **RAG** (retri
 flowchart LR
     A["CV file<br/>PDF or DOCX"] --> H{"Already indexed<br/>and unchanged?"}
     H -- yes --> Z["Skip"]
-    H -- no --> B["Extract with Docling<br/>layout, headings, tables"]
+    H -- no --> B["Extract with Document Intelligence<br/>layout, headings, tables"]
     B --> C["Split by section"]
     C --> M["Read name, title, email,<br/>phone, location: generic NER<br/>(GLiNER), no rules"]
     M --> D["Embed each chunk<br/>Azure OpenAI"]
@@ -71,15 +71,15 @@ flowchart LR
 ```
 
 1. **Skip unchanged CVs.** Every chunk is stored with a hash of the file content (plus a fingerprint of the extraction, chunking, section and details-reading code and settings). If the stored hash matches, the CV is skipped and shown as "already indexed, unchanged".
-2. **Extract with Docling.** [Docling](https://github.com/docling-project/docling) reads the page layout, so multi-column CVs come out in the right reading order, tables become markdown, and section headings are detected. It handles PDF and DOCX. The result is cached on disk in `.cache/extracted/` (by file content), so changing the chunking never runs Docling again.
-3. **Split by section.** The CV is cut at its headings (the ones Docling found, plus short ALL-CAPS lines). Each section becomes one chunk and starts with its heading. Only a section longer than `CHUNK_SIZE` (1500 characters) is split further, with 20% overlap, preferring line breaks. Text before the first heading goes under "Other".
+2. **Extract with Azure AI Document Intelligence.** Its `prebuilt-layout` model reads the page layout, so multi-column CVs come out in the right reading order, tables become markdown, and section headings are detected. It handles PDF and DOCX. The result is cached on disk in `.cache/extracted/` (by file content), so changing the chunking never calls the service again.
+3. **Split by section.** The CV is cut at its headings (the ones the service found, plus short ALL-CAPS lines). Each section becomes one chunk and starts with its heading. Only a section longer than `CHUNK_SIZE` (1500 characters) is split further, with 20% overlap, preferring line breaks. Text before the first heading goes under "Other".
 4. **Read the CV's details (a generic NER, no rules).** A generic named-entity model, [GLiNER](https://github.com/urchade/GLiNER) (medium, Apache-2.0, 1.5 GB, downloaded the first time), reads the first page of the CV and is asked, one label at a time, for the candidate's **name** ("person name"), **job title**, **email address**, **phone number** and **location** ("city, country"). It keeps the highest-scoring answer for each. There are no patterns, no word lists and **no fallback**: if the model cannot be loaded, reading the CV fails with a clear message. It runs on your computer (on the GPU if there is one) and costs no Azure call, but it is slow on CPU, about 8 seconds per CV. **Years of experience are not read:** a generic NER only finds words that are written in the text, and years of experience is worked out from which dates are jobs, which it cannot tell from a degree's dates. Measured on 8 real CVs it found a name, title, email and phone for all 8 and a location for 6, but some answers are wrong, so check the **Candidates** view after uploading. Asking for all five labels in one go found far less than asking one at a time, and reading the second page only added wrong answers.
 5. **Label each chunk.** The heading is kept as `section` (as written in the CV) and also mapped to a standard `section_type`: experience, education, skills, projects, summary, certifications, languages, contact or other. The page number is stored too.
 6. **Embed each chunk.** An embedding is a list of numbers that captures the meaning of a text. Each chunk is sent to Azure OpenAI together with its file name and the candidate's name and title, so even a chunk from page 3 still points to the right CV. The batch size and the number of requests in flight are learned while running: a rate-limit answer (429) halves the number of requests in flight and a run of successes raises it again, and a batch the service says is too large is halved and remembered.
 7. **Save to Azure AI Search.** The new chunks are uploaded first, then chunks the new version no longer has are deleted, so a CV is never missing from the index.
 8. **Save the original** to Azure Blob Storage, then clear the answer cache (see [Caching](#caching)).
 
-Several CVs are processed in parallel (as many at a time as the computer has cores, between 2 and 8) by a background queue, and the Library shows each file's state live (the sidebar shows a progress bar on every page while it runs). Docling runs one conversion at a time (its models are not thread-safe), but other CVs can embed and upload while one is being read. One CV failing, for example a scanned PDF with no text, never stops the others.
+Several CVs are processed in parallel (as many at a time as the computer has cores, between 2 and 8) by a background queue, and the Library shows each file's state live (the sidebar shows a progress bar on every page while it runs). CVs are read by the service in parallel, and other CVs can embed and upload while one is being read. One CV failing, for example a scanned PDF with no text, never stops the others.
 
 ### 2. Answering a question (every time you ask)
 
@@ -171,7 +171,7 @@ Every answer is saved, like in other chat apps. The sidebar holds only the chats
 ### Look and speed
 
 - **Where the time goes.** Start the app with `CV_PROFILE=1` (for example `CV_PROFILE=1 streamlit run app.py`, or `$env:CV_PROFILE=1` first in PowerShell) and the terminal prints one line per page run, such as `page run 1830 ms | login check 4 | imports 1210 | prepare workspace 590 | sidebar 18 | view: Chat 12`. It shows which step is slow on your machine. Without it nothing is measured.
-- **Start-up.** The first page after login no longer waits for Docling to import, and the search index is not re-sent to Azure on every start when it is already complete.
+- **Start-up.** The first page after login no longer waits for the NER model to load, and the search index is not re-sent to Azure on every start when it is already complete.
 
 - **Fast clicks.** The list of CVs is kept for a few minutes instead of asking Azure Blob Storage on every click (it refreshes after an upload, a delete, or a re-index). Details panels are built only when you switch **Details** on under an answer, and a long chat first draws its latest 20 messages, with **Load earlier messages** for the rest.
 - **Theme.** The colours come from [.streamlit/config.toml](.streamlit/config.toml), with a light and a dark theme that follow your system setting. The accent colour, the animations and the right-to-left rules are in [cv_chat/ui/styles.css](cv_chat/ui/styles.css).
@@ -234,6 +234,8 @@ cp .env.example .env
 | `AZURE_SEARCH_ENDPOINT` | AI Search service, **Overview**, **Url** |
 | `AZURE_SEARCH_KEY` | AI Search service, **Settings**, **Keys**, **Primary admin key** (use the admin key, a query key is read-only) |
 | `AZURE_SEARCH_INDEX` | A name prefix you choose, for example `cvs-index`. Each user gets `<prefix>-<user id>`, created at sign-up |
+| `AZURE_DOCINTEL_ENDPOINT` | Document Intelligence resource, **Keys and Endpoint** |
+| `AZURE_DOCINTEL_KEY` | Same page, **KEY 1** |
 | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource, **Keys and Endpoint**. Use only `https://<name>.openai.azure.com` |
 | `AZURE_OPENAI_API_KEY` | Same page, **KEY 1** |
 | `AZURE_OPENAI_API_VERSION` | Keep `2024-10-21` |
@@ -249,7 +251,7 @@ docker compose up -d      # Postgres for accounts and chats
 streamlit run app.py
 ```
 
-The browser opens automatically. Each user's search index and Blob container are created when they sign up (and checked each time they log in). The first CV also loads the Docling layout models, which are downloaded on first use, so it takes noticeably longer than the next ones.
+The browser opens automatically. Each user's search index and Blob container are created when they sign up (and checked each time they log in). The first CV also loads the GLiNER model, which is downloaded on first use, so it takes noticeably longer than the next ones.
 
 ---
 
@@ -281,7 +283,7 @@ chat-with-cv/
 ├── .env.example              # template for your Azure and Postgres settings
 ├── .streamlit/config.toml    # the light and dark theme
 ├── docker-compose.yml        # Postgres for accounts and chats
-├── .cache/                   # saved Docling output (created on first run, git-ignored)
+├── .cache/                   # saved extraction output (created on first run, git-ignored)
 ├── requirements.txt          # the packages to install (pip install -r requirements.txt)
 └── cv_chat/
     ├── config.py             # reads .env and holds all settings
@@ -294,7 +296,7 @@ chat-with-cv/
     │   ├── search_index.py       # create the index, save chunks, hybrid + semantic search
     │   └── openai_service.py     # batched embeddings, chat answers, streaming
     ├── processing/           # no Azure
-    │   ├── extract.py            # Docling: PDF / DOCX to pages and headings (cached)
+    │   ├── extract.py            # Document Intelligence: PDF / DOCX to pages and headings (cached)
     │   ├── chunking.py           # pages to section-based chunks
     │   ├── entities.py           # the generic NER (GLiNER): name, title, email, phone, location
     │   └── sections.py           # heading to standard section type
@@ -334,7 +336,7 @@ flowchart TD
 ```
 
 - `services/` talks to Azure and nothing else. Each file wraps one service.
-- `processing/` never touches Azure or Streamlit, so it can be tested on its own. (`extract.py` needs Docling installed and `entities.py` needs GLiNER, but nothing else.)
+- `processing/` never touches Azure or Streamlit, so it can be tested on its own. (`extract.py` needs the Document Intelligence package and `entities.py` needs GLiNER, but nothing else.)
 - `rag/` combines the two into the upload and question pipelines. It never imports Streamlit.
 - `ui/` only draws screens and calls `rag/`.
 
@@ -348,7 +350,7 @@ Azure values come from `.env` (see [Quick start](#3-add-your-azure-settings)). E
 |---|---|---|
 | `CHUNK_SIZE` | `1500` | Longest chunk in characters. A section shorter than this stays one chunk |
 | `CHUNK_OVERLAP` | `300` | Characters shared between pieces of a long section (20%) |
-| `EXTRACT_CACHE_DIR` | `.cache/extracted` | Where Docling output is saved |
+| `EXTRACT_CACHE_DIR` | `.cache/extracted` | Where the extraction output is saved |
 | `CONTEXT_CHARS` | `36000` | The most CV text sent to the chat model for one question (about 9,000 tokens). Excerpts are added in order of relevance until it is used up, so this one number replaces separate limits on CVs and excerpts. The agent's tools use half of it each |
 | `HISTORY_CHARS` | `6000` | The most recent chat sent along with a question. As many of the latest messages as fit are used |
 | `RETRIEVE_K` | `50` | Chunks fetched and re-ranked per search, then grouped by candidate (50 is the semantic ranker's limit) |
@@ -373,7 +375,7 @@ The search index settings (text analyzer `en.microsoft`, field weights, boosted 
 - **Same CV under a different file name counts as a different CV.** `cv.pdf` and `cv (1).pdf` are stored separately.
 - **After changing extraction or chunking code or settings**, click **Update outdated CVs** (in the Library), or **Process CVs** with the files again. The change is detected automatically and the CVs are re-indexed, even though the files are unchanged; CVs already up to date are skipped. (Any edit to `extract.py`, `chunking.py`, `sections.py` or `entities.py`, even a comment, counts as a change.)
 - **Using an index from an older version of the app:** delete it in the Azure portal (each user's index is named `<AZURE_SEARCH_INDEX>-<user id>`) and process the CVs again. Azure cannot change an analyzer, a field's filterable flag or the vector metric on an existing index, so the app stops at start-up with a message that names what is outdated. After recreating it, click **Update outdated CVs** to index the stored CVs again.
-- **The first CV used to be slow; now the wait is hidden.** Docling and PyTorch take many seconds to load, so they are not loaded when the app starts (the login and chat pages open without them), and they are loaded in the background the first time you open the **Library**. By the time you have picked your files they are usually ready. After that, extraction takes a few seconds per CV on CPU. A GPU is used automatically when there is one, and is much faster.
+- **The first CV used to be slow; now the wait is hidden.** Extraction is done by Azure, so it needs no local models; the GLiNER name/title reader is loaded in the background the first time you open the **Library**.
 - **Delete is permanent.** It removes the original file from Blob Storage and the CV from the index.
 - **Scanned PDFs go through OCR**, which is slower than reading a text PDF. A PDF with no readable text at all is reported as "No text found".
 - **DOCX files have no page numbers**, so their chunks are stored as page 1.
