@@ -15,10 +15,17 @@ def _container(ws: Workspace) -> ContainerClient:
 
 
 def ensure_container(ws: Workspace) -> None:
+    """Create the user's container if it is not there. Azure answers 409 both when it already exists (fine) and while a deleted
+    container is still being removed, which takes up to a minute or more: that second case must not look like success, or every
+    later upload fails with ContainerNotFound."""
     try:
         _container(ws).create_container()
-    except ResourceExistsError:
-        pass
+    except ResourceExistsError as error:
+        if getattr(error, "error_code", None) == "ContainerBeingDeleted":
+            raise RuntimeError(
+                f"The storage container '{ws.container}' was deleted a moment ago and Azure is still removing it. "
+                "Wait about a minute and try again."
+            ) from None
 
 
 def delete_container(ws: Workspace) -> None:
