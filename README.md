@@ -116,7 +116,8 @@ flowchart TD
     A["Uploaded PDF / DOCX"] --> V["Validate file name"]
     V --> H{"Hash of content + pipeline<br/>fingerprint already indexed?"}
     H -- "yes (and not forced)" --> Z["Skipped"]
-    H -- no --> X["Extract<br/>Azure Document Intelligence<br/>(cached on disk by content)"]
+    H -- no --> O["Save the original to<br/>Azure Blob Storage"]
+    O --> X["Extract<br/>Azure Document Intelligence<br/>(cached on disk by content)"]
     X --> T{"Any text?"}
     T -- no --> F["Failed: No text found"]
     T -- yes --> C["Chunk by section<br/>(headings, ALL-CAPS lines)"]
@@ -124,8 +125,7 @@ flowchart TD
     N --> E["Embed every chunk<br/>Azure OpenAI<br/>(adaptive batching)"]
     E --> U["Upload chunks to<br/>Azure AI Search"]
     U --> D["Delete stale chunks<br/>of the old version"]
-    D --> B["Upload original to<br/>Azure Blob Storage"]
-    B --> K["Clear this user's cache"]
+    D --> K["Clear this user's cache"]
 ```
 
 Implemented in [`cv_chat/rag/ingest.py`](cv_chat/rag/ingest.py) (`process_cv`), driven by [`cv_chat/rag/jobs.py`](cv_chat/rag/jobs.py).
@@ -136,13 +136,13 @@ Implemented in [`cv_chat/rag/ingest.py`](cv_chat/rag/ingest.py) (`process_cv`), 
 |---|---|---|---|
 | 1 | **Validate the name** | Upload names come from the browser: 1 to 200 characters, no `/` or `\`, not `.` or `..`, no control characters. | `ingest.validate_file_name` |
 | 2 | **Skip if unchanged** | The CV's `file_id` is the MD5 of its file name. The `content_hash` is the MD5 of the file bytes plus a *pipeline fingerprint* (chunk size, overlap, `INDEX_VERSION` and the source of `extract.py`, `chunking.py`, `sections.py`, `entities.py`). If the stored hash matches, the CV is skipped. Editing any of those four files, even a comment, makes every CV "outdated". | `_pipeline_fingerprint`, `search_index.get_hash` |
-| 3 | **Extract** | The bytes go to Document Intelligence `prebuilt-layout`. Paragraphs and tables are merged by their offset in the document, which gives the correct **reading order**. Table cells become one markdown table (their paragraphs are dropped so nothing is duplicated). Paragraphs with the role `title` or `sectionHeading` become the **headers**; `pageNumber` and `pageFooter` are dropped. The result (`pages`, `headers`) is cached in `.cache/extracted/<md5>.json`, written to a temp file and renamed, so parallel CVs never see half a file. | `processing/extract.py` |
-| 4 | **Chunk by section** | A line is a heading if the layout model labelled it, or it is a short (at most 5 words, 40 characters) ALL-CAPS line. Each section becomes one chunk that starts with its heading. Only a section longer than `CHUNK_SIZE` (1500 characters) is cut further, with 20% overlap, preferring line breaks. Text before the first heading goes under **Other**. A heading with no body makes no chunk. | `processing/chunking.py` |
-| 5 | **Read the candidate's details** | GLiNER (`gliner_medium-v2.1`) is asked, **one label at a time**, for *person name*, *job title*, *email address*, *phone number* and *location* on the first page. It first finds the **header block** (up to 10 lines before and 1 after the email line, because a layout reader can place the header anywhere), and takes the first confident answer from there. Anything missing is searched in the following sections, in reading order. There are no patterns, no word lists and **no fallback**: if the model cannot load, the CV fails with a clear message. Values are cleaned (no angle brackets, one line, 100 characters). Years of experience are deliberately **not** read: a generic NER cannot tell a job's dates from a degree's. | `processing/entities.py` |
-| 6 | **Label each chunk** | The heading is stored as `section` (as written) and mapped to a standard `section_type`: `experience`, `education`, `skills`, `projects`, `summary`, `certifications`, `languages`, `contact` or `other`. The page number is stored too. | `processing/sections.py` |
-| 7 | **Embed** | Each chunk is embedded as `CV: <file name>\nCandidate: <name>, <title>\n<chunk text>`, so a chunk from page 3 still points to the right person. Batches start at 64 texts and are **halved and remembered** if Azure says a batch is too large. The number of requests in flight is an `AdaptiveLimit`: it starts at `min(4, cores)`, **halves on a 429** (after waiting as long as Azure's `retry-after` asks) and grows by one after 10 successes. | `services/openai_service.py` |
-| 8 | **Save to the index** | Chunks are uploaded **first**, then chunks the new version no longer has are deleted, so a CV is never missing from the index, even if the run is interrupted. | `search_index.upload_chunks`, `delete_stale_chunks` |
-| 9 | **Save the original** | The file goes to the user's Blob container. | `blob_storage.upload_file` |
+| 3 | **Save the original** | The file goes to the user's Blob container **before** any slow or fallible step. If extraction, NER, embedding or indexing fails later (or the browser is closed), the original is already stored, so **Re-index** can retry without a new upload. | `blob_storage.upload_file` |
+| 4 | **Extract** | The bytes go to Document Intelligence `prebuilt-layout`. Paragraphs and tables are merged by their offset in the document, which gives the correct **reading order**. Table cells become one markdown table (their paragraphs are dropped so nothing is duplicated). Paragraphs with the role `title` or `sectionHeading` become the **headers**; `pageNumber` and `pageFooter` are dropped. The result (`pages`, `headers`) is cached in `.cache/extracted/<md5>.json`, written to a temp file and renamed, so parallel CVs never see half a file. | `processing/extract.py` |
+| 5 | **Chunk by section** | A line is a heading if the layout model labelled it, or it is a short (at most 5 words, 40 characters) ALL-CAPS line. Each section becomes one chunk that starts with its heading. Only a section longer than `CHUNK_SIZE` (1500 characters) is cut further, with 20% overlap, preferring line breaks. Text before the first heading goes under **Other**. A heading with no body makes no chunk. | `processing/chunking.py` |
+| 6 | **Read the candidate's details** | GLiNER (`gliner_medium-v2.1`) is asked, **one label at a time**, for *person name*, *job title*, *email address*, *phone number* and *location* on the first page. It first finds the **header block** (up to 10 lines before and 1 after the email line, because a layout reader can place the header anywhere), and takes the first confident answer from there. Anything missing is searched in the following sections, in reading order. There are no patterns, no word lists and **no fallback**: if the model cannot load, the CV fails with a clear message. Values are cleaned (no angle brackets, one line, 100 characters). Years of experience are deliberately **not** read: a generic NER cannot tell a job's dates from a degree's. | `processing/entities.py` |
+| 7 | **Label each chunk** | The heading is stored as `section` (as written) and mapped to a standard `section_type`: `experience`, `education`, `skills`, `projects`, `summary`, `certifications`, `languages`, `contact` or `other`. The page number is stored too. | `processing/sections.py` |
+| 8 | **Embed** | Each chunk is embedded as `CV: <file name>\nCandidate: <name>, <title>\n<chunk text>`, so a chunk from page 3 still points to the right person. Batches start at 64 texts and are **halved and remembered** if Azure says a batch is too large. The number of requests in flight is an `AdaptiveLimit`: it starts at `min(4, cores)`, **halves on a 429** (after waiting as long as Azure's `retry-after` asks) and grows by one after 10 successes. | `services/openai_service.py` |
+| 9 | **Save to the index** | Chunks are uploaded **first**, then chunks the new version no longer has are deleted, so a CV is never missing from the index, even if the run is interrupted. | `search_index.upload_chunks`, `delete_stale_chunks` |
 | 10 | **Invalidate caches** | The user's whole cache is cleared (see [Caching](#caching)). | `cache.clear()` |
 
 Each chunk stores the plain Blob address of its CV (`file_url`); the container is private, so signed links are made on demand (see [Security](#security)).
@@ -152,9 +152,9 @@ Each chunk stores the plain Blob address of its CV (`file_url`); the container i
 [`jobs.py`](cv_chat/rag/jobs.py) runs ingestion so the app stays usable:
 
 - One `IngestQueue` per user, all sharing one `ThreadPoolExecutor` of `cpu_count` workers (clamped to 2 to 8). The work is I/O-bound.
-- A job moves through `queued → processing (stage) → indexed | skipped | failed`. Stages shown live: *reading layout → reading name, title and contact → embedding → saving*.
+- A job moves through `queued → processing (stage) → indexed | skipped | failed`. Stages shown live: *saving original → reading layout → reading name, title and contact → embedding → saving*.
 - The Library polls the job list every 2 seconds, and the sidebar shows a progress bar on every page while jobs run.
-- **One failing CV never stops the others** (a scanned PDF with no text, a bad name, a rate limit).
+- **One failing CV never stops the others** (a scanned PDF with no text, a bad name, a rate limit). A CV that fails after step 3 keeps its stored original, shows in the Library without details, and can be retried with **Re-index**.
 - On submit, if nothing is running, `remove_deleted_cvs` deletes index chunks of CVs whose blob no longer exists (for example deleted in the portal).
 - **Re-index** passes `data=None`, which downloads the stored original instead of asking for an upload. **Update outdated CVs** re-runs every stored CV; those already current are skipped by the hash check.
 

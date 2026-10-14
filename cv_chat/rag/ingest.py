@@ -48,7 +48,7 @@ def file_id_for(file_name: str) -> str:
 def process_cv(
     ws: Workspace, file_name: str, data: bytes, force: bool = False, on_stage: Callable[[str], None] = lambda stage: None
 ) -> tuple[int, bool]:
-    """Index one CV and store the original file. Returns (chunks, skipped); skipped means it was already indexed.
+    """Store the original file, then index the CV. Returns (chunks, skipped); skipped means it was already indexed.
 
     on_stage is told what the CV is doing, for the live status in the sidebar.
     """
@@ -58,6 +58,8 @@ def process_cv(
     if not force and search_index.get_hash(ws, file_id) == content_hash:
         return 0, True
 
+    on_stage("saving original")
+    blob_storage.upload_file(ws, file_name, data)  # first, so a failure in any later step still leaves the file for Re-index
     on_stage("reading layout")
     document = extract_cv(file_name, data)
     if not any(text.strip() for _, text in document.pages):
@@ -83,7 +85,6 @@ def process_cv(
     on_stage("saving")
     search_index.upload_chunks(ws, docs)  # upload first, then drop leftovers, so the CV is never missing from the index
     search_index.delete_stale_chunks(ws, file_id, {doc["id"] for doc in docs})
-    blob_storage.upload_file(ws, file_name, data)
     cache_for(ws).clear()  # cached searches and answers may not know this CV's new content
     return len(chunks), False
 

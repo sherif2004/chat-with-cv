@@ -44,7 +44,7 @@ class IngestQueue:
         """files: (file name, bytes). bytes=None means use the stored original (re-index). May raise if Azure setup fails."""
         ingest.prepare(self._ws)
         with self._submit_lock:
-            if not self.active():  # a file in progress is in the index before it reaches Blob Storage, so never sweep while one runs
+            if not self.active():  # sweep only when idle: a file that is being deleted or replaced must not be swept half-way
                 ingest.remove_deleted_cvs(self._ws)
             with self._lock:
                 self._jobs = {name: job for name, job in self._jobs.items() if job.state not in FINISHED}
