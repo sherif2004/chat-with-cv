@@ -42,7 +42,9 @@ class IngestQueue:
 
     def submit(self, files: list[tuple[str, bytes | None]], force: bool = False) -> None:
         """files: (file name, bytes). bytes=None means use the stored original (re-index). May raise if Azure setup fails."""
-        ingest.prepare(self._ws)
+        files = list(files)
+        rebuilt = ingest.prepare(self._ws)  # a new search index is empty: the stored CVs are queued with the files just added
+        files += [(name, None) for name in rebuilt if name not in {queued for queued, _ in files}]
         with self._submit_lock:
             if not self.active():  # sweep only when idle: a file that is being deleted or replaced must not be swept half-way
                 ingest.remove_deleted_cvs(self._ws)

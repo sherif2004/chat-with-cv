@@ -3,12 +3,14 @@
 CVs are processed in parallel threads: the work is I/O-bound (HTTP calls to Azure).
 """
 import hashlib
-from functools import lru_cache
-from pathlib import Path
+import json
+import threading
+from collections import defaultdict
 from collections.abc import Callable
+from functools import lru_cache
 
 from cv_chat.config import settings
-from cv_chat.processing import chunking, entities, extract, sections
+from cv_chat.processing import entities
 from cv_chat.processing.chunking import chunk_cv
 from cv_chat.processing.extract import extract_cv
 from cv_chat.processing.sections import section_type
@@ -17,7 +19,13 @@ from cv_chat.services import blob_storage, openai_service, search_index
 from cv_chat.workspace import Workspace
 
 
-INDEX_VERSION = 3  # bump when the stored chunk fields change: older CVs then show up as outdated and are re-indexed
+_prepare_locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)  # one per user: two sessions must not rebuild one index
+_prepare_locks_guard = threading.Lock()
+
+
+def _prepare_lock(ws: Workspace) -> threading.Lock:
+    with _prepare_locks_guard:
+        return _prepare_locks[ws.user_id]
 
 
 def validate_file_name(file_name: str) -> None:
@@ -34,11 +42,17 @@ def validate_file_name(file_name: str) -> None:
 
 @lru_cache(maxsize=1)
 def _pipeline_fingerprint() -> bytes:
-    """Changes whenever the extraction or chunking code or its settings change, so those CVs get re-indexed by themselves."""
-    digest = hashlib.md5(f"{settings.chunking.max_chars}/{settings.chunking.overlap}/{INDEX_VERSION}".encode())
-    for module in (extract, chunking, sections, entities):
-        digest.update(Path(module.__file__).read_bytes())
-    return digest.digest()
+    """Changes whenever a setting that shapes the stored chunks changes (chunking, sections, entities, what is kept from a
+    CV) or settings.ingest.pipeline_version is bumped, so those CVs get re-indexed by themselves. Editing the code alone
+    does not change it: bump the pipeline version after changing how a CV is processed."""
+    shaping = {
+        "pipeline_version": settings.ingest.pipeline_version,
+        "extraction": settings.extraction.version,
+        "chunking": settings.chunking.model_dump(),
+        "sections": settings.sections.model_dump(),
+        "entities": settings.entities.model_dump(),
+    }
+    return hashlib.md5(json.dumps(shaping, sort_keys=True).encode()).digest()
 
 
 def process_cv(
@@ -93,10 +107,14 @@ def delete_cv(ws: Workspace, file_name: str) -> None:
         cache_for(ws).clear()
 
 
-def prepare(ws: Workspace) -> None:
-    """Create the user's container and search index, or bring an older index up to the current fields, before anything uses them."""
-    blob_storage.ensure_container(ws)
-    search_index.ensure_index(ws, openai_service.embedding_dimensions())
+def prepare(ws: Workspace) -> list[str]:
+    """Create the user's container and search index before anything uses them, or create the index again when this version
+    of the app wants a different one. Returns the stored CVs that must be indexed again (all of them after a new index; none
+    when the index is current)."""
+    with _prepare_lock(ws):
+        blob_storage.ensure_container(ws)
+        rebuilt = search_index.ensure_index(ws, openai_service.embedding_dimensions())
+        return blob_storage.list_files(ws) if rebuilt else []
 
 
 def destroy(ws: Workspace) -> None:

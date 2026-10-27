@@ -6,6 +6,7 @@ that names all of it; settings_error.describe turns it into a message for the sc
 """
 import re
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -130,7 +131,19 @@ class EntitiesSettings(_Group):
         return self
 
 
+class IndexSettings(_Group):
+    version: int = Field(3, ge=1)  # bump when the stored fields or keys change: every user's index is then rebuilt from the stored CVs
+    analyzer: str = "en.microsoft"  # English stemming and stop words for keyword search ("built" also finds "building")
+    semantic_config: str = "default"
+    scoring_profile: str = "cv"
+    text_weights: dict[str, float] = {"candidate_name": 3.0, "job_title": 2.0, "file_name": 2.0, "section": 1.5, "content": 1.0}
+    section_boost: float = Field(1.5, gt=0)  # extra weight of the boosted sections (settings.sections.boosted)
+    vector_metric: Literal["cosine", "dotProduct", "euclidean"] = "cosine"
+    delete_batch: int = Field(500, ge=1, le=1000)  # chunks removed per request
+
+
 class IngestSettings(_Group):
+    pipeline_version: int = Field(1, ge=1)  # bump when processing logic changes: CVs processed by an older version are re-indexed
     max_name_bytes: int = Field(255, ge=1, le=255)  # a file name, in UTF-8; the search key made from it must stay under Azure's 1024 limit
 
 
@@ -154,6 +167,7 @@ class Settings(BaseSettings):
     retrieval: RetrievalSettings = RetrievalSettings()
     extraction: ExtractionSettings = ExtractionSettings()
     entities: EntitiesSettings = EntitiesSettings()
+    index: IndexSettings = IndexSettings()
     ingest: IngestSettings = IngestSettings()
     agent: AgentSettings = AgentSettings()
     cache: CacheSettings = CacheSettings()
