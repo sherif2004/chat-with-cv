@@ -110,6 +110,24 @@ class ExtractionSettings(_Group):
 
 class EntitiesSettings(_Group):
     model: str = "urchade/gliner_medium-v2.1"  # generic NER (GLiNER medium, Apache-2.0, 1.5 GB): name, title, email, phone, location
+    labels: dict[str, str] = {  # each detail and the plain-language label the model is asked for
+        "candidate_name": "person name", "job_title": "job title", "email": "email address", "phone": "phone number", "location": "location",
+    }
+    location_fallback_labels: list[str] = ["city", "country"]  # below the header the label "location" also finds universities
+    location_sections: list[str] = ["summary", "contact", "experience"]  # besides the header, where a location may be read
+    threshold: float = Field(0.3, gt=0, le=1)  # the lowest confidence the model's answer may have
+    email_threshold: float = Field(0.1, gt=0, le=1)  # lower: the surest answer of several is taken
+    window_words: int = Field(150, ge=20)  # the model reads about 384 tokens at a time
+    name_line_words: int = Field(4, ge=1)
+    title_line_words: int = Field(6, ge=1)  # a title inside a line this short is taken as the whole line ("Junior AI Engineer")
+    max_value_chars: int = Field(100, ge=10)
+
+    @model_validator(mode="after")
+    def _known_labels(self) -> "EntitiesSettings":
+        needed = {"candidate_name", "job_title", "email", "phone", "location"}
+        if set(self.labels) != needed:
+            raise ValueError(f"labels must be exactly: {', '.join(sorted(needed))}")
+        return self
 
 
 class IngestSettings(_Group):

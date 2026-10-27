@@ -62,7 +62,7 @@ def process_cv(
 
     chunks = chunk_cv(document.pages, document.headers)
     on_stage("reading name, title and contact")
-    meta = entities.extract(document.pages)
+    meta = entities.extract(chunks)
     on_stage("embedding")
     # Embed each chunk together with its file name, so chunks from later pages still point to the candidate.
     who = f"\nCandidate: {meta['candidate_name']}, {meta['job_title']}" if meta["candidate_name"] else ""
