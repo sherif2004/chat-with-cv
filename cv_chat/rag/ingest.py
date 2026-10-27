@@ -5,6 +5,7 @@ CVs are processed in parallel threads: the work is I/O-bound (HTTP calls to Azur
 import hashlib
 import json
 import threading
+import time
 from collections import defaultdict
 from collections.abc import Callable
 from functools import lru_cache
@@ -14,7 +15,7 @@ from cv_chat.processing import entities
 from cv_chat.processing.chunking import chunk_cv
 from cv_chat.processing.extract import extract_cv
 from cv_chat.processing.sections import section_type
-from cv_chat.rag.cache import cache_for
+from cv_chat.rag.cache import CVS, cache_for
 from cv_chat.services import blob_storage, openai_service, search_index
 from cv_chat.workspace import Workspace
 
@@ -85,7 +86,7 @@ def process_cv(
     file_url = blob_storage.blob_url(ws, file_name)
     docs = [
         {
-            "id": search_index.chunk_key(file_name, i), "file_id": file_name, "file_name": file_name, "file_url": file_url,
+            "id": search_index.chunk_key(file_name, i), "chunk_no": i, "file_id": file_name, "file_name": file_name, "file_url": file_url,
             "section": chunk.section, "section_type": section_type(chunk.section), "page": chunk.page,
             "content": chunk.text, "content_hash": content_hash, "content_vector": vector, **meta,
         }
@@ -131,4 +132,13 @@ def remove_deleted_cvs(ws: Workspace) -> None:
 
 
 def list_cvs(ws: Workspace) -> list[str]:
-    return blob_storage.list_files(ws)
+    """The file names of the user's CVs. Listing the container is a network call and every question needs the list, so it is
+    kept for settings.cache.cv_list_seconds; adding or deleting a CV clears it at once."""
+    cache = cache_for(ws)
+    cached = cache.get(CVS, "all")
+    if cached is not None and time.monotonic() - cached[0] < settings.cache.cv_list_seconds:
+        return list(cached[1])
+    token = cache.token()
+    names = blob_storage.list_files(ws)
+    cache.put(CVS, "all", (time.monotonic(), names), token)
+    return list(names)

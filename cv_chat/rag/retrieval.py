@@ -23,7 +23,7 @@ def embed_question(question: str) -> tuple[float, ...]:
 def search(
     ws: Workspace, query: str, sections: list[str], file_ids: list[str] | None = None, where: str | None = None, trace: Trace | None = None
 ) -> list[dict]:
-    """One hybrid search with semantic re-ranking, limited to the sections when there are enough hits. Cached."""
+    """One hybrid search with semantic re-ranking, boosting the sections the router picked (one Azure request). Cached."""
     start = time.perf_counter()
     info = {"sections": sections, "cvs": len(file_ids or []), "filter": where or "", "cached": False, "fallback": False, "embed_ms": 0}
 
@@ -41,7 +41,7 @@ def search(
     embed_start = time.perf_counter()
     vector = list(embed_question(query))
     info["embed_ms"] = round((time.perf_counter() - embed_start) * 1000, 1)
-    results = _hybrid(ws, query, vector, sections, file_ids, where)
+    results = search_index.hybrid_search(ws, query, vector, settings.retrieval.search_k, boost_sections=sections, file_ids=file_ids, where=where)
     cache.put(SEARCH, key, results, token)
     return record(results)
 
@@ -115,17 +115,6 @@ def retrieve(
     rank = {name: position for position, name in enumerate(best)}
     matched = sorted((result for result in results if result["file_name"] in rank), key=lambda result: rank[result["file_name"]])
     return Retrieved(load_cvs(ws, best, trace), matched)
-
-
-def _hybrid(ws: Workspace, query: str, vector: list[float], sections: list[str], file_ids: list[str] | None, where: str | None) -> list[dict]:
-    """When the router picked sections, search those sections and everything at the same time and merge the two lists, so
-    a CV with unusual headings is still found and no "too few hits" threshold is needed."""
-    if not sections:
-        return search_index.hybrid_search(ws, query, vector, settings.retrieval.search_k, file_ids=file_ids, where=where)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        focused = pool.submit(search_index.hybrid_search, ws, query, vector, settings.retrieval.search_k, sections, file_ids, where)
-        everything = pool.submit(search_index.hybrid_search, ws, query, vector, settings.retrieval.search_k, None, file_ids, where)
-        return fuse([focused.result(), everything.result()])
 
 
 def _weights(results: list[dict]) -> list[float]:

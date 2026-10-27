@@ -12,7 +12,7 @@ from typing import Any
 from cv_chat.config import settings
 from cv_chat.workspace import Workspace
 
-ROUTE, SEARCH, ANSWER, CHAT = "route", "search", "answer", "chat"
+ROUTE, SEARCH, ANSWER, CHAT, CVS = "route", "search", "answer", "chat", "cvs"
 
 
 class Cache:

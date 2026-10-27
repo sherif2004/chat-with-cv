@@ -36,6 +36,7 @@ from cv_chat.workspace import Workspace
 log = logging.getLogger(__name__)
 META_FIELDS = ["candidate_name", "job_title", "email", "phone", "location"]
 
+_semantic_available = True  # False once the service has said it has no semantic ranker
 DELIMITERS = ("|", ";", "~", "^")  # for search.in: the first one that is in none of the file names
 
 
@@ -101,6 +102,7 @@ def _fields(dimensions: int) -> list[SearchField]:
         SearchableField(name="section", filterable=True, facetable=True),  # headings are searchable and weighted too
         SimpleField(name="section_type", type=SearchFieldDataType.String, filterable=True),
         SimpleField(name="page", type=SearchFieldDataType.Int32, filterable=True),
+        SimpleField(name="chunk_no", type=SearchFieldDataType.Int32, filterable=True, sortable=True),  # the chunk's position in its CV
         SimpleField(name="content_hash", type=SearchFieldDataType.String),
         SearchableField(name="candidate_name", filterable=True),
         SearchableField(name="job_title", filterable=True),
@@ -197,18 +199,9 @@ def delete_file_chunks(ws: Workspace, file_id: str) -> None:
 
 
 def list_profiles(ws: Workspace) -> dict[str, dict]:
-    """The metadata of every indexed CV, by file name (read from one chunk of each CV)."""
-    results = _client(ws).search("*", select=["file_name", *META_FIELDS], top=1000)
-    profiles: dict[str, dict] = {}
-    for result in results:
-        profiles.setdefault(result["file_name"], {name: result.get(name) for name in META_FIELDS})
-    return profiles
-
-
-def cvs_mentioning(ws: Workspace, words: str) -> set[str]:
-    """File names of the CVs whose text contains every one of the words."""
-    results = _client(ws).search(words, search_fields=["content"], search_mode="all", select=["file_name"], top=1000)
-    return {result["file_name"] for result in results}
+    """The metadata of every indexed CV, by file name: one row per CV (its first chunk)."""
+    results = _client(ws).search("*", filter="chunk_no eq 0", select=["file_name", *META_FIELDS], top=1000)
+    return {result["file_name"]: {name: result.get(name) for name in META_FIELDS} for result in results}
 
 
 def metadata_filter(job_title: str | None = None) -> str | None:
@@ -231,9 +224,9 @@ def delete_chunks(ws: Workspace, ids: list[str]) -> None:
 def get_cv_chunks(ws: Workspace, file_id: str) -> list[dict]:
     """Every chunk of one CV in reading order."""
     results = _client(ws).search(
-        "*", filter=file_id_filter([file_id]), select=["id", "file_name", "file_url", "section", "page", "content", *META_FIELDS], top=1000
+        "*", filter=file_id_filter([file_id]), select=["chunk_no", "file_name", "file_url", "section", "page", "content", *META_FIELDS], top=1000
     )
-    chunks = sorted(results, key=lambda r: int(r["id"].rsplit("-", 1)[1]))  # the id ends with the chunk's position
+    chunks = sorted(results, key=lambda r: r["chunk_no"])
     return [
         {"file_name": c["file_name"], "file_url": c.get("file_url") or "", "section": c.get("section") or "", "page": c.get("page"), "content": c["content"], "caption": "",
          **{name: c.get(name) for name in META_FIELDS}}
@@ -246,44 +239,43 @@ def hybrid_search(
     text: str,
     vector: list[float],
     k: int,
-    section_types: list[str] | None = None,
+    boost_sections: list[str] | None = None,
     file_ids: list[str] | None = None,
     where: str | None = None,
 ) -> list[dict]:
-    """Keyword and vector search in one query, merged, then re-ranked by the semantic ranker.
+    """One Azure request that does keyword search, vector search and semantic re-ranking together.
 
-    section_types limits the search to those standard sections (see processing/sections.py);
-    file_ids limits it to those CVs; where is an extra OData filter (see metadata_filter).
+    boost_sections are the standard sections (see processing/sections.py) whose chunks rank higher through the scoring profile;
+    nothing is filtered out, so a CV with unusual headings is still found. Without them the default boosted sections are used.
+    file_ids limits the search to those CVs; where is an extra OData filter (see metadata_filter).
     """
-    filters = []
-    if section_types:
-        filters.append(f"search.in(section_type, '{','.join(section_types)}', ',')")
-    if file_ids:
-        filters.append(file_id_filter(file_ids))
-    if where:
-        filters.append(f"({where})")
-    section_filter = " and ".join(filters) or None
+    global _semantic_available
+    filters = [file_id_filter(file_ids or []), f"({where})" if where else None]
     kwargs = dict(
         search_text=text,
         vector_queries=[VectorizedQuery(vector=vector, k_nearest_neighbors=k, fields="content_vector")],
-        filter=section_filter,
+        filter=" and ".join(f for f in filters if f) or None,
         select=["file_name", "file_url", "section", "page", "content", *META_FIELDS],
         scoring_profile=settings.index.scoring_profile,
-        scoring_parameters=[f"boostSections-{','.join(settings.sections.boosted)}"],
+        scoring_parameters=[f"boostSections-{','.join(boost_sections or settings.sections.boosted)}"],
         top=k,
     )
-    try:
-        results = list(_client(ws).search(
-            query_type="semantic",
-            semantic_configuration_name=settings.index.semantic_config,
-            query_caption="extractive|highlight-false",  # the passage the ranker found most relevant, for Sources
-            **kwargs,
-        ))
-    except HttpResponseError as error:
-        if "semantic" not in str(error).lower():
-            raise
-        # The service has no semantic ranker (Free tier, or switched off): keep answering with plain hybrid search.
-        log.warning("semantic ranker unavailable, using hybrid search only: %s", str(error).splitlines()[0])
+    results = None
+    if _semantic_available:
+        try:
+            results = list(_client(ws).search(
+                query_type="semantic",
+                semantic_configuration_name=settings.index.semantic_config,
+                query_caption="extractive|highlight-false",  # the passage the ranker found most relevant, for Sources
+                **kwargs,
+            ))
+        except HttpResponseError as error:
+            if "semantic" not in str(error).lower():
+                raise
+            # The service has no semantic ranker (Free tier, or switched off): plain hybrid search from now on, without asking again.
+            log.warning("semantic ranker unavailable, using hybrid search only: %s", str(error).splitlines()[0])
+            _semantic_available = False
+    if results is None:
         results = list(_client(ws).search(**kwargs))
     found = []
     for result in results:

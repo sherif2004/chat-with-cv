@@ -171,6 +171,7 @@ class AgentSettings(_Group):
 
 class CacheSettings(_Group):
     size: int = Field(256, ge=1)  # entries kept per kind of cached result (router, search, answer)
+    cv_list_seconds: int = Field(60, ge=1)  # how long the list of a user's CVs is kept (adding or deleting a CV clears it at once)
 
 
 class Settings(BaseSettings):

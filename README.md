@@ -211,7 +211,7 @@ If the call fails or the JSON is unusable, the app falls back to a plain search 
 
 ### 2. Role check
 
-When `role` is set, [`roles.find`](cv_chat/rag/roles.py) looks for CVs where every word of the role is in the stored job title or in the CV text. If **no** CV has it, the app answers "No CV has the role X" and lists the job titles that exist, instead of returning loosely related people. If some do, only those CVs are searched.
+When `role` is set, [`roles.find`](cv_chat/rag/roles.py) looks for CVs where every word of the role is in the job title read from the CV. If **no** CV has it, the app answers "No CV has the role X" and lists the job titles that exist, instead of returning loosely related people. If some do, only those CVs are searched. A role that is named only in a CV's text, and not in its title, does not count.
 
 ### 3. Retrieval
 
@@ -223,7 +223,7 @@ When `role` is set, [`roles.find`](cv_chat/rag/roles.py) looks for CVs where eve
    - *keyword search* on the English analyzer (`en.microsoft`, stemming and stop words), with the `cv` **scoring profile**: name match ×3, job title ×2, file name ×2, section heading ×1.5, body ×1, plus a +1.5 boost for chunks in the `experience` and `skills` sections;
    - *vector search* (HNSW, cosine) over the chunk embeddings;
    - merged by Azure, then re-ordered by the **semantic ranker** (top 50, `retrieval.search_k`), which also returns the best passage of each chunk (the "caption") for the Sources list.
-4. If the router picked sections, the focused search **and** a search over everything run in parallel and are merged, so a CV with unusual headings is still found. No "too few hits" threshold is needed.
+4. The whole search is **one Azure request**. If the router picked sections, they are passed as a **boost** (`boostSections` of the scoring profile) and nothing is filtered out, so a CV with unusual headings is still found. On a service without the semantic ranker (Free tier) the first search falls back to plain hybrid search and the app remembers it, so later searches do not try again.
 5. With several queries, result lists are merged by **reciprocal rank fusion**: a chunk scores `1/(60 + rank)` in each list it appears in.
 6. If the service has no semantic ranker (Free tier), it logs a warning and uses plain hybrid search.
 
@@ -298,6 +298,7 @@ One document per chunk.
 | `section` | searchable, filterable, facetable | Heading as written in the CV |
 | `section_type` | string, filterable | Standard type; target of the section boost |
 | `page` | int, filterable | DOCX CVs are page 1 |
+| `chunk_no` | int, filterable, sortable | The chunk's position in its CV: gives the reading order, and `chunk_no eq 0` reads one profile row per CV |
 | `content` | searchable, `en.microsoft` | The chunk text, starting with its heading |
 | `content_vector` | vector | HNSW, cosine, dimension read from your embedding model |
 | `content_hash` | string | File bytes + pipeline fingerprint, for the skip check |
@@ -553,7 +554,7 @@ To see where time goes in the UI itself, start with `CV_PROFILE=1 streamlit run 
 - **Years of experience are not read**; the app does not show or filter by them.
 - **NER accuracy.** On 8 real CVs it found a name, title, email and phone for all 8 and a location for 6, but some answers are wrong: check the Candidates view after uploading. On CPU it takes about 8 seconds per CV; a GPU is used automatically when its kernels are available.
 - **The embedding size is fixed on an index** when it is created. To switch to a model with another size, delete each user's index in the Azure portal and re-process.
-- **Cost and latency.** Every question makes one router call before the search. Query expansion adds one call and two searches (answers start 1 to 2 s later). A complex question can take several model calls, often 10 to 30 s. Document Intelligence is billed per page.
+- **Cost and latency.** Every question makes one router call before the search, and the list of your CVs is kept for 60 seconds instead of listing Blob Storage each time. Query expansion adds one call and two searches (answers start 1 to 2 s later). A complex question can take several model calls, often 10 to 30 s. Document Intelligence is billed per page.
 - **Delete is permanent**: it removes the original from Blob Storage and the CV from the index.
 - **Starting from an older version of the app** (shared container and index, before per-user resources): re-upload the CVs from a user account, then delete the old container and index in the portal.
 
