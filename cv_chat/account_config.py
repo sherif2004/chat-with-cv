@@ -16,6 +16,8 @@ class AccountSettings(BaseSettings):
     max_users: int = Field(15, ge=1)  # one Azure AI Search index per user, and the Basic tier allows 15
     min_password: int = Field(8, ge=8)  # it can be made stricter, never weaker than 8
     session_days: int = Field(14, ge=1)
+    max_failed_attempts: int = Field(5, ge=1)  # wrong passwords or recovery codes before an email (or user) is locked
+    lockout_minutes: int = Field(15, ge=1)  # failures older than this are forgotten; the lock lasts until the oldest one is this old
     pool_max: int = Field(5, ge=1)  # Postgres connections kept
 
 

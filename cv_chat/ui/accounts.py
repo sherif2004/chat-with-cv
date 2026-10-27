@@ -190,14 +190,24 @@ def account_menu(user: auth.User) -> None:
         password = st.text_input("Your password", type="password", key="delete_password")
         if st.button("Delete my account", icon=":material/delete_forever:", type="primary", width="stretch",
                      disabled=confirm.strip().lower() != user.email or not password):
-            if auth.check_password(user.id, password):
-                _delete_account(user)
+            try:
+                correct = auth.check_password(user.id, password)
+            except auth.AuthError as error:  # too many wrong attempts
+                st.error(str(error))
             else:
-                st.error("Wrong password.")
+                if correct:
+                    _delete_account(user)
+                else:
+                    st.error("Wrong password.")
 
 
 def _new_recovery_code(user: auth.User) -> None:
-    if not auth.check_password(user.id, st.session_state.get("recovery_password", "")):
+    try:
+        correct = auth.check_password(user.id, st.session_state.get("recovery_password", ""))
+    except auth.AuthError as error:  # too many wrong attempts
+        st.toast(str(error), icon=":material/error:")
+        return
+    if not correct:
         st.toast("Wrong password.", icon=":material/error:")
         return
     st.session_state["recovery_code"] = auth.issue_recovery_code(user.id)  # shown by _recovery_gate on the next run

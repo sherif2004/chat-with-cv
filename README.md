@@ -325,6 +325,7 @@ One private container per user (`<AZURE_STORAGE_CONTAINER>-<user id>`) holding t
 - **Sign up / log in** with email and password. Passwords are **argon2** hashes. A login is a random token in a browser cookie; only its SHA-256 hash is stored. It expires after **14 days** or at logout, and is checked against the database on **every page run**, so ending a session anywhere (logout, password change, account deletion) ends already-open tabs at their next click.
 - **Recovery code.** At sign-up the app shows a one-time code like `ABCD-EFGH-JKLM-NPQR` and asks you to confirm you saved it. Only its SHA-256 is stored. **Forgot password** takes email + code + a new password, sets the password, logs you out everywhere and issues a **new** code (the used one stops working). The code is forgiving about case, dashes and spaces. Older accounts can create their first code from the account menu. If you lose both password and code, someone with database access has to remove the account.
 - **Sign-up cap.** 15 users (`accounts.max_users`), because each user gets their own search index and the Azure Basic tier allows 15.
+- **Limits on guessing.** Wrong passwords, wrong recovery codes and wrong password checks (deleting the account, a new recovery code) are counted per email, or per user for the account menu. After `max_failed_attempts` (5) failures within `lockout_minutes` (15) the email is refused for the rest of that time, even with the right password, and the message says roughly how long to wait. Unknown emails are counted too, so the lock does not reveal which accounts exist. A good login clears the count. Passwords are hashed (about 50 ms) without holding a database connection, so many logins at once do not slow down everyone else's page runs.
 - **Per-user resources.** Sign-up creates the user's Blob container and search index; if either fails the account is not created.
 - **Isolation by construction.** A `Workspace` is built **only** from the logged-in user's UUID (anything else raises) and is passed to every function that touches Azure. Container and index names derive from it, and the answer cache and the ingest queue are per user too. A user's code has no way to name another user's data.
 
@@ -385,10 +386,10 @@ cp .env.example .env    # PowerShell: Copy-Item .env.example .env
 | Variable | Where to find it |
 |---|---|
 | `AZURE_STORAGE_CONNECTION_STRING` | Storage account → Security + networking → Access keys → connection string |
-| `AZURE_STORAGE_CONTAINER` | A name **prefix** you choose, such as `cvs`. Each user gets `<prefix>-<user id>` |
+| `AZURE_STORAGE_CONTAINER` | A name **prefix** you choose, such as `cvs`: 1 to 30 lower-case letters, digits or single hyphens, starting and ending with a letter or digit (Azure's container rules). Each user gets `<prefix>-<user id>` |
 | `AZURE_SEARCH_ENDPOINT` | AI Search → Overview → Url |
 | `AZURE_SEARCH_KEY` | AI Search → Settings → Keys → **Primary admin key** (a query key is read-only) |
-| `AZURE_SEARCH_INDEX` | A name **prefix**, such as `cvs-index`. Each user gets `<prefix>-<user id>` |
+| `AZURE_SEARCH_INDEX` | A name **prefix**, such as `cvs-index`: 1 to 90 lower-case letters, digits or single hyphens, starting and ending with a letter or digit (Azure's index rules). Each user gets `<prefix>-<user id>` |
 | `AZURE_DOCINTEL_ENDPOINT` | Document Intelligence → Keys and Endpoint |
 | `AZURE_DOCINTEL_KEY` | Same page, **KEY 1** |
 | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI → Keys and Endpoint, only `https://<name>.openai.azure.com` (a trailing `/openai/v1` is removed for you) |
@@ -420,7 +421,7 @@ Sign up, open the **Library**, drop some CVs, click **Process CVs**, and start c
 | **Candidates** | One card per CV (name, title, location, email). Filter by text, sort, open the original, **Chat with this CV**, or tick **Compare** on up to three and press **Ask the chat to compare them**. It reads the metadata of the first 1000 chunks, so with very many CVs some cards may lack details. |
 | **Library** | Upload PDF/DOCX and press **Process CVs**. A live table of states (*waiting*, the current stage, a green check with the chunk count, a grey check for skipped, a red mark with the reason). The CV table (file, candidate, title) has **Open CV** (one-hour signed link), **Re-index** and **Delete**. **Update outdated CVs** re-indexes only CVs processed by an older pipeline. **Clear status** removes finished entries. |
 
-**Chats** are saved like in other chat apps. The sidebar has **New chat**, a **Search chats** box (titles and the text of every question and answer, your own chats only), and your chats grouped under *Today / Yesterday / Previous 7 days / Older*. Each chat's ⋮ menu renames it or deletes it after a confirmation. New chats are named by the small model when `AZURE_OPENAI_SMALL_DEPLOYMENT` is set. The model only ever sees the latest messages that fit `HISTORY_CHARS`.
+**Chats** are saved like in other chat apps. The sidebar has **New chat**, a **Search chats** box (titles and the text of every question and answer, your own chats only; a `pg_trgm` index keeps it fast on long histories, and the app works without it where the extension is not allowed), and your chats grouped under *Today / Yesterday / Previous 7 days / Older*. Each chat's ⋮ menu renames it or deletes it after a confirmation. New chats are named by the small model when `AZURE_OPENAI_SMALL_DEPLOYMENT` is set. The model only ever sees the latest messages that fit `HISTORY_CHARS`.
 
 **First run.** Until your first chat the welcome screen shows a three-step checklist and starter questions built from your own CVs (such as "Compare the Engineers" or "Who is based in London?") with no model call.
 
@@ -513,7 +514,7 @@ Settings are validated with pydantic ([`cv_chat/config.py`](cv_chat/config.py)).
 | `concurrency.per_user_chat` | `3` | Chat calls one user may have starting at once |
 | `concurrency.ingest_workers` | CPU cores (2 to 8) | CVs processed at once, all users together |
 
-Accounts ([`cv_chat/account_config.py`](cv_chat/account_config.py), needs no Azure values): `DATABASE_URL` (as before), `CVCHAT_ACCOUNTS_MAX_USERS` (15), `CVCHAT_ACCOUNTS_MIN_PASSWORD` (8, can only be raised), `CVCHAT_ACCOUNTS_SESSION_DAYS` (14). `CV_PROFILE` is read by the profiler.
+Accounts ([`cv_chat/account_config.py`](cv_chat/account_config.py), needs no Azure values): `DATABASE_URL` (as before), `CVCHAT_ACCOUNTS_MAX_USERS` (15), `CVCHAT_ACCOUNTS_MIN_PASSWORD` (8, can only be raised), `CVCHAT_ACCOUNTS_SESSION_DAYS` (14), `CVCHAT_ACCOUNTS_MAX_FAILED_ATTEMPTS` (5) and `CVCHAT_ACCOUNTS_LOCKOUT_MINUTES` (15). `CV_PROFILE` is read by the profiler.
 
 ---
 

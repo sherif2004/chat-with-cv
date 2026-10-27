@@ -19,6 +19,14 @@ def _alias(name: str) -> AliasChoices:
     return AliasChoices(name)
 
 
+def _azure_name_prefix(value: str, longest: int, what: str) -> str:
+    """Azure names are lower-case letters, digits and single hyphens, starting and ending with a letter or digit."""
+    value = value.lower()
+    if len(value) > longest or not re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", value):
+        raise ValueError(f"{what} must be 1 to {longest} lower-case letters, digits or single hyphens, starting and ending with a letter or digit")
+    return value
+
+
 class AzureSettings(BaseSettings):
     """The Azure resources. Deployment names, not model names, for Azure OpenAI."""
 
@@ -41,6 +49,16 @@ class AzureSettings(BaseSettings):
     chat_deployment: str = Field(min_length=1, validation_alias=_alias("AZURE_OPENAI_CHAT_DEPLOYMENT"))
     # Optional: a smaller, cheaper deployment for small jobs such as naming a chat. Without it a chat is named after its first question.
     small_deployment: str = Field("", validation_alias=_alias("AZURE_OPENAI_SMALL_DEPLOYMENT"))
+
+    @field_validator("storage_container")
+    @classmethod
+    def _container_prefix(cls, value: str) -> str:
+        return _azure_name_prefix(value, longest=30, what="The storage container prefix")  # 30 + "-" + 32 hex digits = Azure's 63
+
+    @field_validator("search_index")
+    @classmethod
+    def _index_prefix(cls, value: str) -> str:
+        return _azure_name_prefix(value, longest=90, what="The search index prefix")  # 90 + 33 stays under Azure's 128
 
     @field_validator("openai_endpoint")
     @classmethod

@@ -2,13 +2,19 @@
 
 Passwords are stored as argon2 hashes. A session token is random; only its SHA-256 hash is stored,
 so a leaked database does not give anyone a working login.
+
+Hashing takes about 50 ms, so it never happens while a database connection is held: the pool is small and every page run
+asks it for the session. Failed logins, password checks and recovery-code guesses are counted per email (or per user) and
+refused for a while once there are too many, so a password cannot be guessed without limit.
 """
 import hashlib
 import hmac
+import math
 import re
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
@@ -34,6 +40,48 @@ class User:
 
 def _digest(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+# ---- too many failures: a key is "login:<email>", "reset:<email>" or "password:<user id>"
+
+def _locked_minutes(key: str) -> int:
+    """How many minutes until this key may try again; 0 when it is not locked. It is locked while it has max_failed_attempts
+    failures newer than lockout_minutes, and is free again when the oldest of them is lockout_minutes old."""
+    with db.pool().connection() as conn:
+        rows = conn.execute(
+            "SELECT failed_at FROM auth_failures WHERE key = %s AND failed_at > now() - make_interval(mins => %s) "
+            "ORDER BY failed_at DESC LIMIT %s",
+            (key, cfg.lockout_minutes, cfg.max_failed_attempts),
+        ).fetchall()
+    if len(rows) < cfg.max_failed_attempts:
+        return 0
+    free_at = rows[-1][0] + timedelta(minutes=cfg.lockout_minutes)
+    return max(1, math.ceil((free_at - datetime.now(free_at.tzinfo)).total_seconds() / 60))
+
+
+def _refuse_if_locked(key: str) -> None:
+    if minutes := _locked_minutes(key):
+        raise AuthError(f"Too many failed attempts. Try again in about {minutes} minute{'' if minutes == 1 else 's'}.")
+
+
+def _record_failure(key: str) -> None:
+    with db.pool().connection() as conn:
+        conn.execute("DELETE FROM auth_failures WHERE failed_at < now() - make_interval(mins => %s)", (cfg.lockout_minutes,))
+        conn.execute("INSERT INTO auth_failures (key) VALUES (%s)", (key,))
+
+
+def _clear_failures(key: str) -> None:
+    with db.pool().connection() as conn:
+        conn.execute("DELETE FROM auth_failures WHERE key = %s", (key,))
+
+
+def _password_matches(stored_hash: str | None, password: str) -> bool:
+    """argon2 check without a database connection. An unknown account is checked against a dummy hash, so timing does not reveal it."""
+    try:
+        _hasher.verify(stored_hash or _DUMMY_HASH, password)
+    except VerificationError:
+        return False
+    return stored_hash is not None
 
 
 def sign_up(email: str, password: str, on_created: Callable[[User], None] | None = None) -> User:
@@ -87,44 +135,64 @@ def reset_password(email: str, code: str, new_password: str) -> str:
     email = email.strip().lower()
     if len(new_password) < cfg.min_password:
         raise AuthError(f"The new password needs at least {cfg.min_password} characters.")
+    key = f"reset:{email}"
+    _refuse_if_locked(key)
     with db.pool().connection() as conn:
         row = conn.execute("SELECT id, recovery_hash FROM users WHERE email = %s", (email,)).fetchone()
-        stored = row[1] if row and row[1] else _digest("no-recovery-code")  # compared anyway, so timing does not show who exists
-        matches = hmac.compare_digest(stored, _digest(_normalise_code(code)))
-        if row is None or not row[1] or not matches:
+    stored = row[1] if row and row[1] else _digest("no-recovery-code")  # compared anyway, so timing does not show who exists
+    matches = hmac.compare_digest(stored, _digest(_normalise_code(code)))
+    if row is None or not row[1] or not matches:
+        _record_failure(key)
+        raise AuthError("Wrong email or recovery code.")
+    new_hash = _hasher.hash(new_password)
+    with db.pool().connection() as conn:
+        # only if the code is still the one that was checked: a code works once, also when two requests race
+        changed = conn.execute(
+            "UPDATE users SET password_hash = %s WHERE id = %s AND recovery_hash = %s RETURNING id", (new_hash, row[0], row[1])
+        ).fetchone()
+        if changed is None:
             raise AuthError("Wrong email or recovery code.")
-        conn.execute("UPDATE users SET password_hash = %s WHERE id = %s", (_hasher.hash(new_password), row[0]))
         conn.execute("DELETE FROM sessions WHERE user_id = %s", (row[0],))
+    _clear_failures(key)
     return issue_recovery_code(str(row[0]))
 
 
 def check_password(user_id: str, password: str) -> bool:
-    """True if this is the user's password. For actions that must not rest on a session alone, such as deleting the account."""
+    """True if this is the user's password. For actions that must not rest on a session alone, such as deleting the account.
+    Raises AuthError when there have been too many wrong attempts."""
+    key = f"password:{user_id}"
+    _refuse_if_locked(key)
     with db.pool().connection() as conn:
         row = conn.execute("SELECT password_hash FROM users WHERE id = %s", (user_id,)).fetchone()
-    try:
-        _hasher.verify(row[0] if row else _DUMMY_HASH, password)
-    except VerificationError:
+    if not _password_matches(row[0] if row else None, password):
+        _record_failure(key)
         return False
-    return row is not None
+    _clear_failures(key)
+    return True
 
 
 def change_password(user_id: str, current: str, new: str, keep_token: str | None = None) -> None:
     """Set a new password after checking the current one. Every other session of the user is ended; keep_token stays."""
     if len(new) < cfg.min_password:
         raise AuthError(f"The new password needs at least {cfg.min_password} characters.")
+    key = f"password:{user_id}"
+    _refuse_if_locked(key)
     with db.pool().connection() as conn:
         row = conn.execute("SELECT password_hash FROM users WHERE id = %s", (user_id,)).fetchone()
-        try:
-            _hasher.verify(row[0] if row else _DUMMY_HASH, current)
-        except VerificationError:
-            row = None
-        if row is None:
-            raise AuthError("The current password is wrong.")
-        conn.execute("UPDATE users SET password_hash = %s WHERE id = %s", (_hasher.hash(new), user_id))
+    if not _password_matches(row[0] if row else None, current):
+        _record_failure(key)
+        raise AuthError("The current password is wrong.")
+    new_hash = _hasher.hash(new)
+    with db.pool().connection() as conn:
+        changed = conn.execute(
+            "UPDATE users SET password_hash = %s WHERE id = %s AND password_hash = %s RETURNING id", (new_hash, user_id, row[0])
+        ).fetchone()
+        if changed is None:  # changed somewhere else while this request was hashing
+            raise AuthError("Your password was changed somewhere else. Try again.")
         conn.execute(
             "DELETE FROM sessions WHERE user_id = %s AND token_hash <> %s", (user_id, _digest(keep_token) if keep_token else "")
         )
+    _clear_failures(key)
 
 
 def delete_user(user_id: str) -> None:
@@ -136,15 +204,16 @@ def delete_user(user_id: str) -> None:
 def log_in(email: str, password: str) -> str:
     """Check the password and return a new session token to store in the browser."""
     email = email.strip().lower()
+    key = f"login:{email}"
+    _refuse_if_locked(key)
     with db.pool().connection() as conn:
         row = conn.execute("SELECT id, password_hash FROM users WHERE email = %s", (email,)).fetchone()
-        try:
-            _hasher.verify(row[1] if row else _DUMMY_HASH, password)
-        except VerificationError:
-            row = None
-        if row is None:
-            raise AuthError("Wrong email or password.")
-        token = secrets.token_urlsafe(32)
+    if not _password_matches(row[1] if row else None, password):
+        _record_failure(key)
+        raise AuthError("Wrong email or password.")
+    _clear_failures(key)
+    token = secrets.token_urlsafe(32)
+    with db.pool().connection() as conn:
         conn.execute(
             "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (%s, %s, now() + make_interval(days => %s))",
             (_digest(token), row[0], cfg.session_days),

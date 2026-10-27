@@ -1,9 +1,14 @@
-"""Postgres access: accounts and sessions now, chat history later. Separate from config.py so it needs no Azure values."""
+"""Postgres access: accounts, sessions, chat history and failed-login counts. Separate from config.py so it needs no Azure values."""
+import logging
+
 from psycopg_pool import ConnectionPool
 
 from cv_chat.account_config import accounts
 
+log = logging.getLogger(__name__)
+
 SCHEMA = """
+SELECT pg_advisory_xact_lock(2);  -- two processes starting together must not create the tables at the same time
 CREATE TABLE IF NOT EXISTS users (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     email text NOT NULL UNIQUE,
@@ -38,6 +43,20 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages(conversation_id, id);
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS feedback smallint;  -- 1 thumbs up, -1 thumbs down
+CREATE TABLE IF NOT EXISTS auth_failures (
+    id bigserial PRIMARY KEY,
+    key text NOT NULL,  -- login:<email>, reset:<email> or password:<user id>
+    failed_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS auth_failures_key_idx ON auth_failures(key, failed_at DESC);
+CREATE INDEX IF NOT EXISTS auth_failures_time_idx ON auth_failures(failed_at);
+"""
+
+# Searching chats is a substring search over every message; a trigram index makes it fast. It needs the pg_trgm extension, which
+# some hosted databases do not allow: then the app works and the search just stays slower on big histories.
+SEARCH_INDEX_SQL = """
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX IF NOT EXISTS messages_content_trgm ON messages USING gin (content gin_trgm_ops);
 """
 
 _pool: ConnectionPool | None = None
@@ -53,3 +72,8 @@ def pool() -> ConnectionPool:
 def init_schema() -> None:
     with pool().connection() as conn:
         conn.execute(SCHEMA)
+    try:
+        with pool().connection() as conn:
+            conn.execute(SEARCH_INDEX_SQL)
+    except Exception as error:
+        log.warning("no text-search index on chat messages (searching chats stays slower on big histories): %s", str(error).splitlines()[0])

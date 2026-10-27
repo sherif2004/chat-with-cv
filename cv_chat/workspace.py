@@ -15,7 +15,9 @@ class Workspace:
     user_id: str
 
     def __post_init__(self):
-        uuid.UUID(self.user_id)  # raises for anything that is not a UUID, so a name can never be built from free text
+        # raises for anything that is not a UUID, so a name can never be built from free text; kept in its one canonical form,
+        # so {..}, urn:uuid:.. and upper-case spellings give the same workspace and valid Azure names
+        object.__setattr__(self, "user_id", str(uuid.UUID(self.user_id)))
 
     @property
     def _suffix(self) -> str:
