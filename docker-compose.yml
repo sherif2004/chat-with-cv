@@ -1,4 +1,22 @@
 services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env  # your Azure values: copy .env.example to .env and fill them in
+    environment:
+      DATABASE_URL: postgresql://cvchat:cvchat@postgres:5432/cvchat  # overrides localhost from .env
+      HF_HUB_OFFLINE: "1"  # the model comes from the mounted cache below: never go to the internet for it
+      TRANSFORMERS_OFFLINE: "1"
+    ports:
+      - "8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      # The NER model (urchade/gliner_medium-v2.1 and its tokenizer) from your computer, read-only. Another folder: set HF_CACHE_DIR in .env.
+      - ${HF_CACHE_DIR:-${HOME}/.cache/huggingface}:/opt/hf-cache:ro
+      - appcache:/app/.cache  # CV layouts read by Document Intelligence, so re-indexing does not pay for them again
+
   postgres:
     image: postgres:16
     restart: unless-stopped
@@ -17,3 +35,4 @@ services:
 
 volumes:
   pgdata:
+  appcache:
