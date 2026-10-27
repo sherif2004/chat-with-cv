@@ -17,7 +17,7 @@ class FakeIndex:
     def __init__(self, answers: list[list[dict]]):
         self.answers, self.searches = list(answers), []
 
-    def hybrid_search(self, ws, text, vector, k, boost_sections=None, file_ids=None, where=None):
+    def hybrid_search(self, ws, text, vector, k, boost_sections=None, file_ids=None, section_types=None):
         self.searches.append({"text": text, "file_ids": file_ids, "boost": boost_sections})
         return self.answers.pop(0) if self.answers else []
 

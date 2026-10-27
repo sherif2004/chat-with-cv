@@ -20,11 +20,12 @@ def embed_question(question: str) -> tuple[float, ...]:
 
 
 def search(
-    ws: Workspace, query: str, sections: list[str], file_ids: list[str] | None = None, where: str | None = None, trace: Trace | None = None
+    ws: Workspace, query: str, sections: list[str], file_ids: list[str] | None = None, only_sections: bool = False, trace: Trace | None = None
 ) -> list[dict]:
-    """One hybrid search with semantic re-ranking, boosting the sections the router picked (one Azure request). Cached."""
+    """One hybrid search with semantic re-ranking (one Azure request). The sections boost the ranking, or with only_sections
+    are the only sections searched. Cached."""
     start = time.perf_counter()
-    info = {"sections": sections, "cvs": len(file_ids or []), "filter": where or "", "cached": False, "fallback": False, "embed_ms": 0}
+    info = {"sections": sections, "cvs": len(file_ids or []), "filter": f"only in {', '.join(sections)}" if only_sections and sections else "", "cached": False, "fallback": False, "embed_ms": 0}
 
     def record(results: list[dict]) -> list[dict]:
         if trace:
@@ -32,7 +33,7 @@ def search(
         return results
 
     cache = cache_for(ws)
-    key = (query, tuple(sections), tuple(file_ids or ()), where)
+    key = (query, tuple(sections), tuple(file_ids or ()), only_sections)
     if (cached := cache.get(SEARCH, key)) is not None:
         info["cached"] = True
         return record(cached)
@@ -40,7 +41,10 @@ def search(
     embed_start = time.perf_counter()
     vector = list(embed_question(query))
     info["embed_ms"] = round((time.perf_counter() - embed_start) * 1000, 1)
-    results = search_index.hybrid_search(ws, query, vector, settings.retrieval.search_k, boost_sections=sections, file_ids=file_ids, where=where)
+    results = search_index.hybrid_search(
+        ws, query, vector, settings.retrieval.search_k, boost_sections=sections, file_ids=file_ids,
+        section_types=sections if only_sections else None,
+    )
     cache.put(SEARCH, key, results, token)
     return record(results)
 
@@ -68,7 +72,7 @@ def shorten(chunk: dict) -> dict:
 
 def retrieve(
     ws: Workspace, query: str, sections: list[str], names: list[str], trace: Trace | None = None,
-    k: int = settings.retrieval.top_k, scoped: bool = False,
+    k: int = settings.retrieval.top_k, scoped: bool = False, only_sections: bool = False,
 ) -> Retrieved:
     """Find the `k` best CVs for the question and the sections of them that the model needs.
 
@@ -76,17 +80,22 @@ def retrieve(
     limited to them. The first search returns only the best chunks, which can come from a few CVs, so the CVs it missed are
     searched again (at most cover_rounds times) until `k` CVs, or all of them, are covered: a question about everyone needs
     something from each candidate. The model then reads only the chunks the searches found in the best `k` CVs.
+    only_sections=True searches only the sections given (the user asked about those sections); if that finds nothing, the search
+    is repeated without the restriction, since the router may have picked the wrong sections.
     """
     file_ids = names if scoped else None
     allowed = set(names)
-    results = [result for result in search(ws, query, sections, file_ids, trace=trace) if result["file_name"] in allowed]
+    results = [result for result in search(ws, query, sections, file_ids, only_sections, trace) if result["file_name"] in allowed]
+    if only_sections and not results:
+        only_sections = False
+        results = [result for result in search(ws, query, sections, file_ids, False, trace) if result["file_name"] in allowed]
     aim = min(k, len(names))
     for _ in range(settings.retrieval.cover_rounds):
         found = {result["file_name"] for result in results}
         missing = [name for name in names if name not in found]
         if len(found) >= aim or not missing:
             break
-        results = results + [result for result in search(ws, query, sections, missing, trace=trace) if result["file_name"] in allowed]
+        results = results + [result for result in search(ws, query, sections, missing, only_sections, trace) if result["file_name"] in allowed]
     rank = {name: position for position, name in enumerate(best_cvs(results, k))}
     chosen = sorted(
         (result for result in results if result["file_name"] in rank),

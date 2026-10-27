@@ -20,7 +20,7 @@ class Spy:
     def __init__(self):
         self.calls = []
 
-    def retrieve(self, ws, query, sections, names, trace=None, k=None, scoped=False):
+    def retrieve(self, ws, query, sections, names, trace=None, k=None, scoped=False, only_sections=False):
         self.calls.append({"query": query, "cvs": names, "k": k, "scoped": scoped})
         return retrieval.Retrieved([], [])
 

@@ -8,7 +8,7 @@ from typing import NamedTuple
 
 from cv_chat.config import settings
 from cv_chat.processing.sections import SECTION_TYPES
-from cv_chat.rag import agent, ingest, retrieval, roles
+from cv_chat.rag import agent, filters, ingest, retrieval
 from cv_chat.rag.cache import ANSWER, CHAT, ROUTE, Cache, cache_for
 from cv_chat.rag.trace import Trace
 from cv_chat.services import openai_service
@@ -35,7 +35,7 @@ CHAT_PROMPT = """You are the assistant of a "chat with CVs" app. The user's mess
 Do not state any fact about a candidate. If they ask what you can do, say you answer questions about the uploaded CVs."""
 
 ROUTER_PROMPT = f"""You prepare a message for a chat over a set of candidate CVs.
-Given the chat so far and the latest message, reply with JSON: {{"route": "...", "query": "...", "sections": [...], "role": "...", "everyone": false, "ask": "..."}}.
+Given the chat so far and the latest message, reply with JSON: {{"route": "...", "query": "...", "sections": [...], "section_only": false, "role": "...", "location": "...", "everyone": false, "ask": "..."}}.
 - "route": one of
   "chat"    - a greeting, thanks, or anything that needs no CV search;
   "simple"  - a question that one search over the CVs can answer;
@@ -48,8 +48,13 @@ Given the chat so far and the latest message, reply with JSON: {{"route": "...",
   (write names in Latin letters when you can). If it already stands alone in English, repeat it unchanged.
 - "sections": the CV sections that hold the answer, chosen only from {SECTION_TYPES}.
   Use [] when the question is about the whole CV or you are unsure.
+- "section_only": true only when the user asks specifically about one or more CV sections (for example "compare their
+  experience", "list everyone's education"), so that only those sections are searched; false when "sections" is just a hint
+  about where the answer may be (for example "who knows Python?").
 - "role": the job title the user wants candidates for, only when the message asks to find or filter candidates by one specific
   job role (for example "find a data engineer"), written in English. "" for a skill, a person's name, or no role.
+- "location": the place the user wants candidates from, only when the message asks to find or filter candidates by a place
+  (for example "engineers in Cairo"), written in English. "" for no place.
 - "everyone": true when the message wants every candidate (or all of the selected ones) compared, ranked or listed on the same
   point (for example "compare their Python skills", "who has the most experience?", "list everyone's education"); false for a
   question about one person or one specific skill or fact.
@@ -74,6 +79,8 @@ class Route:
     role: str = ""  # a specific job role the user asked for, if any
     everyone: bool = False  # the question compares, ranks or lists all the candidates: answer from a fixed number of them (top-k)
     ask: str = ""  # the question to put to the user, for the "clarify" kind
+    location: str = ""  # a place the user asked for, if any
+    section_only: bool = False  # the user asked about specific sections: search only `sections` (otherwise they only boost the ranking)
 
 
 def _route(cache: Cache, question: str, history: list[dict], trace: Trace | None = None) -> Route:
@@ -108,7 +115,9 @@ def _route(cache: Cache, question: str, history: list[dict], trace: Trace | None
         if kind == "clarify" and not ask:
             kind = "simple"  # nothing to ask: answer with the best reading
         everyone = data.get("everyone") is True and kind in ("simple", "complex")
-        route = Route(kind, query, sections, role, everyone, ask if kind == "clarify" else "")
+        location = " ".join(str(data.get("location") or "").split())[:80]
+        section_only = data.get("section_only") is True and bool(sections)
+        route = Route(kind, query, sections, role, everyone, ask if kind == "clarify" else "", location, section_only)
     except Exception:  # routing only improves the search, so a failure must never block the answer
         return done(Route("simple", question, []), cached=False, failed=True)  # not cached: the next try may work
     cache.put(ROUTE, key, route, token)
@@ -265,16 +274,9 @@ def _answer(
     if route.kind == "clarify":  # nothing to search yet: ask what is missing
         on_step("The question needs more detail")
         return Answer(iter([route.ask]), [], "clarify")
-    if route.role:  # a specific role was asked for: it must exist in the CVs, and only the CVs that have it are used
-        on_step(f"Checking that the role '{route.role}' exists in the CVs")
-        try:
-            have, titles = roles.find(ws, route.role, scope)
-        except Exception as error:  # the check only narrows the search, so a failure must never block the answer
-            log.warning("role check failed, answering without it: %s", error)
-        else:
-            if not have:
-                return Answer(iter([roles.missing_message(route.role, titles)]), [], "role_missing")
-            scope = have
+    scope, nothing_matches = _filter_cvs(ws, route, scope, on_step)
+    if nothing_matches:
+        return Answer(iter([nothing_matches]), [], "role_missing")
     if route.kind == "complex" and not route.everyone:  # needs more than the best CVs: let the agent plan its own searches
         on_step("Complex question: planning the searches")
         try:
@@ -297,6 +299,23 @@ def _answer(
     return Answer(_guarded(context, messages_for, trace, sources), sources, "simple")
 
 
+def _filter_cvs(ws: Workspace, route: Route, scope: list[str], on_step: Callable[[str], None]) -> tuple[list[str], str | None]:
+    """Narrow the CVs to those with the job title and the location the user asked for (see filters.find). Returns the CVs to use
+    and, when none matches, the reply that says what does exist. The check only narrows the search: a failure never blocks the answer."""
+    if not (route.role or route.location):
+        return scope, None
+    asked = " and ".join(part for part in (f"job title '{route.role}'" if route.role else "", f"location '{route.location}'" if route.location else "") if part)
+    on_step(f"Checking the CVs for the {asked}")
+    try:
+        found = filters.find(ws, route.role, route.location, scope)
+    except Exception as error:
+        log.warning("filter check failed, answering without it: %s", error)
+        return scope, None
+    if not found.names:
+        return scope, filters.missing_message(route.role, route.location, found)
+    return found.names, None
+
+
 def _read_cvs(ws: Workspace, route: Route, scope: list[str], on_step: Callable[[str], None], trace: Trace) -> retrieval.Retrieved:
     """The text for the answer: the sections of the top-k CVs that the search found. A question about everyone reads `top_k`
     CVs, any other question `top_k_focused`. scope (the CVs the user chose) limits both the search and the CVs that can be read."""
@@ -306,4 +325,4 @@ def _read_cvs(ws: Workspace, route: Route, scope: list[str], on_step: Callable[[
     k = settings.retrieval.top_k if route.everyone else settings.retrieval.top_k_focused
     reading = f"reading the relevant sections of up to {min(k, len(names))} of {len(names)} CVs"
     on_step(f"Question about everyone: {reading}" if route.everyone else f"Searching the CVs, {reading}")
-    return retrieval.retrieve(ws, route.query, route.sections, names, trace, k, scoped=bool(scope))
+    return retrieval.retrieve(ws, route.query, route.sections, names, trace, k, scoped=bool(scope), only_sections=route.section_only)

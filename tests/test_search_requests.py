@@ -3,7 +3,6 @@ import uuid
 import pytest
 from azure.core.exceptions import HttpResponseError
 
-from cv_chat.rag import roles
 from cv_chat.services import search_index
 from cv_chat.workspace import Workspace
 
@@ -64,10 +63,18 @@ def test_without_picked_sections_the_default_boosted_sections_are_used(monkeypat
     assert client.requests[0]["scoring_parameters"] == ["boostSections-experience,skills"]
 
 
-def test_cvs_and_an_extra_condition_are_filters_of_the_same_request(monkeypatch, ws):
+def test_cvs_and_a_section_filter_are_filters_of_the_same_request(monkeypatch, ws):
     client = install(monkeypatch, FakeClient())
-    search_index.hybrid_search(ws, "python", [0.1], 50, file_ids=["a.pdf"], where="search.ismatch('x', 'job_title')")
-    assert client.requests[0]["filter"] == "file_id eq 'a.pdf' and (search.ismatch('x', 'job_title'))"
+    search_index.hybrid_search(ws, "python", [0.1], 50, file_ids=["a.pdf"], section_types=["experience", "skills"])
+    assert client.requests[0]["filter"] == "file_id eq 'a.pdf' and search.in(section_type, 'experience,skills', ',')"
+    assert len(client.requests) == 1
+
+
+def test_unknown_section_types_never_reach_the_filter(monkeypatch, ws):
+    client = install(monkeypatch, FakeClient())
+    search_index.hybrid_search(ws, "python", [0.1], 50, section_types=["experience', 'x"])
+    search_index.hybrid_search(ws, "python", [0.1], 50, section_types=["hobbies", "skills"])
+    assert client.requests[0]["filter"] is None and client.requests[1]["filter"] == "search.in(section_type, 'skills', ',')"
 
 
 def test_a_service_without_the_semantic_ranker_costs_one_extra_request_once_not_on_every_search(monkeypatch, ws):
@@ -105,25 +112,3 @@ def test_the_chunks_of_a_cv_are_returned_in_reading_order(monkeypatch, ws):
             {"id": "x-1", "chunk_no": 1, "file_name": "a.pdf", "content": "second"}]
     install(monkeypatch, FakeClient(rows))
     assert [c["content"] for c in search_index.get_cv_chunks(ws, "a.pdf")] == ["first", "second", "third"]
-
-
-# --- the role check uses the job title ------------------------------------------------------------------------------
-
-def profiles(monkeypatch, **titles):
-    monkeypatch.setattr(roles.search_index, "list_profiles", lambda ws: {name: {"job_title": title} for name, title in titles.items()})
-
-
-def test_a_cv_has_the_role_when_every_word_of_it_is_in_its_job_title(monkeypatch, ws):
-    profiles(monkeypatch, **{"a.pdf": "Senior Data Engineer", "b.pdf": "Data Analyst", "c.pdf": ""})
-    have, titles = roles.find(ws, "data engineer")
-    assert have == ["a.pdf"] and titles == ["Data Analyst", "Senior Data Engineer"]
-
-
-def test_the_role_check_can_be_limited_to_the_chosen_cvs(monkeypatch, ws):
-    profiles(monkeypatch, **{"a.pdf": "Data Engineer", "b.pdf": "Data Engineer"})
-    assert roles.find(ws, "data engineer", ["b.pdf"])[0] == ["b.pdf"]
-
-
-def test_an_empty_role_matches_every_cv(monkeypatch, ws):
-    profiles(monkeypatch, **{"a.pdf": "x", "b.pdf": "y"})
-    assert roles.find(ws, "   ")[0] == ["a.pdf", "b.pdf"]

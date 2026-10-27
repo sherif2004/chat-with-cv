@@ -31,6 +31,7 @@ from azure.search.documents.indexes.models import (
 from azure.search.documents.models import VectorizedQuery
 
 from cv_chat.config import settings
+from cv_chat.processing.sections import SECTION_TYPES
 from cv_chat.workspace import Workspace
 
 log = logging.getLogger(__name__)
@@ -204,13 +205,6 @@ def list_profiles(ws: Workspace) -> dict[str, dict]:
     return {result["file_name"]: {name: result.get(name) for name in META_FIELDS} for result in results}
 
 
-def metadata_filter(job_title: str | None = None) -> str | None:
-    """An OData filter on the CV metadata: every word of the job title must appear in the title read from the CV."""
-    if job_title and (words := " ".join(job_title.replace("'", " ").split())):
-        return f"search.ismatch('{words}', 'job_title', 'simple', 'all')"
-    return None
-
-
 def get_cv_chunks(ws: Workspace, file_id: str) -> list[dict]:
     """Every chunk of one CV in reading order."""
     results = _client(ws).search(
@@ -232,16 +226,18 @@ def hybrid_search(
     k: int,
     boost_sections: list[str] | None = None,
     file_ids: list[str] | None = None,
-    where: str | None = None,
+    section_types: list[str] | None = None,
 ) -> list[dict]:
     """One Azure request that does keyword search, vector search and semantic re-ranking together.
 
     boost_sections are the standard sections (see processing/sections.py) whose chunks rank higher through the scoring profile;
     nothing is filtered out, so a CV with unusual headings is still found. Without them the default boosted sections are used.
-    file_ids limits the search to those CVs; where is an extra OData filter (see metadata_filter).
+    file_ids limits the search to those CVs; section_types, if given, restricts it to chunks of those standard section types
+    (a hard filter, unlike boost_sections; unknown types are ignored).
     """
     global _semantic_available
-    filters = [file_id_filter(file_ids or []), f"({where})" if where else None]
+    types = [name for name in section_types or [] if name in SECTION_TYPES]
+    filters = [file_id_filter(file_ids or []), f"search.in(section_type, '{','.join(types)}', ',')" if types else None]
     kwargs = dict(
         search_text=text,
         vector_queries=[VectorizedQuery(vector=vector, k_nearest_neighbors=k, fields="content_vector")],

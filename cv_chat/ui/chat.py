@@ -10,7 +10,7 @@ from cv_chat.workspace import Workspace
 ROUTE_NOTES = {
     "chat": "Answered without searching the CVs",
     "clarify": "Asked for more detail before searching",
-    "role_missing": "No CV has the role asked for",
+    "role_missing": "No CV matches the job title or location asked for",
     "simple": "Simple question · one search",
     "complex": "Complex question · answered by the search agent",
 }

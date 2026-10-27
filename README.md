@@ -170,7 +170,7 @@ flowchart TD
 
     R -- chat --> CH["Short reply, no search<br/>(cached by text)"]
     R -- clarify --> CL["Ask the missing detail"]
-    R --> RO{"Specific role asked?"}
+    R --> RO{"Job title or<br/>location asked?"}
     RO -- "no CV has it" --> RM["Say so + list real job titles"]
     RO -- "some CVs" --> SC["Narrow the scope to them"]
     RO -- no --> EV
@@ -201,16 +201,18 @@ Implemented in [`cv_chat/rag/qa.py`](cv_chat/rag/qa.py) (`ask` and `_answer`) an
 |---|---|
 | `route` | `chat` (greeting, thanks, off-topic: no search), `simple` (one search is enough), `complex` (compare, rank, count, list across many CVs, or several questions in one), `clarify` (a missing detail makes it unanswerable, such as "who is the best?" without saying for what; never asked twice in a row) |
 | `query` | The message rewritten to stand alone, follow-ups resolved from the chat, **written in English** whatever the language |
-| `sections` | Which `section_type`s hold the answer, or `[]` when unsure |
-| `role` | A specific job role the user wants candidates for ("find a data engineer"), else empty |
+| `sections` | Which `section_type`s hold the answer, or `[]` when unsure. By default they only **boost** the ranking |
+| `section_only` | `true` only when the user asks specifically about sections ("compare their experience"): then **only** those sections are searched (a hard filter). If that finds nothing, the search is repeated without it |
+| `role` | A specific job title the user wants candidates for ("find a data engineer"), else empty |
+| `location` | A place the user wants candidates from ("engineers in Cairo"), else empty |
 | `everyone` | `true` when the question compares, ranks or lists all the candidates on one point |
 | `ask` | For `clarify` only: one short question in the user's language |
 
 If the call fails or the JSON is unusable, the app falls back to a plain search of the raw question: **routing only improves the search, it can never block an answer**.
 
-### 2. Role check
+### 2. Job title and location filter
 
-When `role` is set, [`roles.find`](cv_chat/rag/roles.py) looks for CVs where every word of the role is in the job title read from the CV. If **no** CV has it, the app answers "No CV has the role X" and lists the job titles that exist, instead of returning loosely related people. If some do, only those CVs are searched. A role that is named only in a CV's text, and not in its title, does not count.
+When `role` (job title) or `location` is set, [`filters.find`](cv_chat/rag/filters.py) looks at the **profile row of each CV** (the title and location read at upload, one row per CV from Azure Search): a CV matches when every word of the filter is in its value, case and plurals ignored ("engineers" matches "Engineer"), and when both filters are set both must match. A CV whose title or location could not be read never matches a filter on it. If **no** CV matches, the app answers "No CV matches the job title X" and lists the job titles and locations that do exist, instead of returning loosely related people. If some do, only those CVs are searched. The same function serves the agent, so both flows filter in the same way and the model is told what exists when a filter is empty.
 
 ### 3. Retrieval
 
@@ -239,7 +241,7 @@ There is no relevance cut-off and no character budget: the text sent is the sect
 | Tool | Does |
 |---|---|
 | `list_cvs` | Every CV with the name, title and contact read from it |
-| `search_cvs` | Hybrid search, optionally limited to some CVs, filtered by `job_title` (an Azure `search.ismatch` filter), with `per_cv` (1 to `agent.per_cv_max`) so one search reaches many CVs |
+| `search_cvs` | Hybrid search, optionally limited to some CVs (`cvs`), narrowed by `job_title` and `location` (the same matching as above), restricted to some section types with `sections` (for example `["experience"]` to compare experience), with `per_cv` (1 to `agent.per_cv_max`) so one search reaches many CVs. A filter that matches nothing returns the job titles and locations that exist, so the model can correct it |
 | `get_cv` | Without `sections`: only the outline of one CV (each section's heading, type and size, no text). With `sections` (standard types such as `experience`, `skills`): just those sections, in order. A whole CV is never returned by default |
 
 - At most `agent.max_rounds` (5) rounds and `agent.max_seconds` (30 s). When the budget is used up, it is told to answer from what it found.
@@ -271,7 +273,7 @@ The prompt tells the model to use only the excerpts, cite `[file name, p.N]` aft
 |---|---|---|---|
 | `chat` | no | none | Reply is written without chat history and cached by the message text |
 | `clarify` | no | none | The router's own short question; never cached |
-| `role_missing` | role check only | none | Lists existing job titles |
+| `role_missing` | job title / location check only | none | Lists the job titles and locations that exist |
 | `simple` | yes | yes | Top-k (`top_k_focused`, or `top_k` when `everyone`) |
 | `complex` | agent's own | yes | Falls back to `simple` if the agent fails |
 
@@ -459,7 +461,7 @@ chat-with-cv/
     │   ├── qa.py                   # router, role check, retrieval, agent, guarded streaming
     │   ├── retrieval.py            # embed, hybrid search, top-k CVs and their sections, excerpt formatting
     │   ├── agent.py                # tool-using agent for complex questions
-    │   ├── roles.py                # does a requested job role exist in the CVs?
+    │   ├── filters.py              # which CVs match a job title / location, from the profile rows
     │   ├── metadata.py             # how a CV's details are shown to the model
     │   ├── cache.py                # per-user in-memory cache with invalidation tokens
     │   └── trace.py                # timed record of one answer, for the Details panel
@@ -522,7 +524,7 @@ Everything is **in memory, per user, per app process** ([`rag/cache.py`](cv_chat
 |---|---|---|
 | **Router results** | question + recent chat | A `chat` decision on a message that opens a chat is also stored by its text alone; decisions made with a history are never shared |
 | **Chat replies** ("hi", "thanks") | message text | Always on. Written without chat history, so nothing can leak between conversations |
-| **Searches** | query + sections + CV filter + metadata filter | Repeats skip Azure and do not use the semantic ranker quota |
+| **Searches** | query + sections + section filter + CV filter | Repeats skip Azure and do not use the semantic ranker quota |
 | **Final answers** | question + recent chat + scope | **Opt-in** (account menu), because a cached answer can be out of date. Clarifying questions are never reused |
 | **Query embeddings** | query text | `lru_cache`, `EMBED_CACHE_SIZE` |
 
