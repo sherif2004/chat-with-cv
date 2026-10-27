@@ -187,7 +187,25 @@ for `search.in`, and the migration order of the work.
 - Section keyword clean-up list in 5.
 - Sources stored in chat history stay the matched chunks only.
 
-## Open questions for the owner
+## Decisions made while building (the owner did not answer the open questions, so the recommendations were used)
+
+- Open question 1: two values, `retrieval.top_k` (20, questions about everyone) and `retrieval.top_k_focused` (3, any other).
+- Open question 2: hyperlink URLs are not recovered (no new dependency).
+- The index is always replaced when its definition changes; the "update additive changes in place" path was dropped because
+  removing the old marker field is itself a breaking change in Azure and one rule is simpler. Adding a field therefore
+  rebuilds the index from the stored CVs, which costs embeddings and NER time but not Document Intelligence calls.
+- Index definition is recognised by a marker field `cvschema_<hash>` instead of a stored signature (an Azure index cannot carry one).
+- `index.version` (stored fields and keys) and `ingest.pipeline_version` (how a CV is processed) are two numbers.
+- Chunking defaults changed to `max_chars` 4000 and `overlap` 400, since a section is meant to stay one chunk.
+- Account and database settings are in `cv_chat/account_config.py`, so the login screen needs no Azure values; the minimum
+  password length can only be raised above 8.
+- Chunks written under the old md5 id scheme are removed by file name when a CV is re-indexed or deleted, and a rebuild removes them all.
+- A limit is held until the response has started, including the per-user cap; a user waiting more than
+  `concurrency.user_wait_seconds` goes on anyway rather than hang.
+- Not done: `list_profiles` and `cvs_mentioning` still read at most 1000 chunks (see "Noticed, not doing").
+- Known cost: with no character budget, a question carries up to `k` complete CVs. Lower `top_k` / `top_k_focused` or choose CVs in the chat to limit tokens.
+
+## Open questions for the owner (answered above)
 
 1. A question about one person would carry `k` whole CVs (default 20). Keep one `top_k` for every question, or use
    `top_k` for "everyone" questions and a small `top_k_focused` (suggested 3) for the rest? Both are top-k only.
