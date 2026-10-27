@@ -25,6 +25,7 @@ class ExtractedCV:
 _lock_for_flag = threading.Lock()
 _client = None  # a DocumentIntelligenceClient, created on first use
 _warm_up_started = False
+_swept = False
 
 
 def _get_client():
@@ -43,10 +44,37 @@ def cache_path(data: bytes, version: int) -> Path:
     return Path(settings.extraction.cache_dir) / f"{hashlib.md5(data).hexdigest()}-v{version}.json"
 
 
+def sweep_old_cache_versions(directory: Path, version: int) -> int:
+    """Delete the cached extractions made under another version (and the unversioned ones of the first release), so old
+    output does not pile up when the version is bumped. Returns how many files were removed."""
+    removed = 0
+    for path in directory.glob("*.json"):
+        if not path.name.endswith(f"-v{version}.json"):
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                log.warning("could not delete the old extraction cache file %s", path.name)
+    return removed
+
+
+def sweep_once() -> None:
+    """The sweep above, the first time a CV is read in this process."""
+    global _swept
+    with _lock_for_flag:
+        if _swept:
+            return
+        _swept = True
+    removed = sweep_old_cache_versions(Path(settings.extraction.cache_dir), settings.extraction.version)
+    if removed:
+        log.info("removed %d cached extraction(s) of an older version", removed)
+
+
 def extract_cv(file_name: str, data: bytes) -> ExtractedCV:
     """Azure Document Intelligence output, cached on disk by file content: changing the chunking never calls the service again."""
     if not file_name.lower().endswith(SUPPORTED):
         raise ValueError(f"Unsupported file type: {file_name} (expected PDF or DOCX)")
+    sweep_once()
     cache_file = cache_path(data, settings.extraction.version)
     try:
         cached = json.loads(cache_file.read_text())

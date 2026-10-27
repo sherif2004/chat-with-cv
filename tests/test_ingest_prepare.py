@@ -26,7 +26,7 @@ def test_a_chunking_setting_changes_the_fingerprint(monkeypatch):
 
 def test_bumping_the_pipeline_version_changes_the_fingerprint(monkeypatch):
     base = fingerprint_with(monkeypatch)
-    bumped = ingest.settings.ingest.model_copy(update={"pipeline_version": 2})
+    bumped = ingest.settings.ingest.model_copy(update={"pipeline_version": ingest.settings.ingest.pipeline_version + 1})
     assert fingerprint_with(monkeypatch, ingest=bumped) != base
 
 
