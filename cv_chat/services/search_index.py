@@ -211,24 +211,15 @@ def metadata_filter(job_title: str | None = None) -> str | None:
     return None
 
 
-def list_chunks(ws: Workspace) -> list[tuple[str, str]]:
-    """(chunk id, file name) for every chunk in the index."""
-    return [(result["id"], result["file_name"]) for result in _client(ws).search("*", select=["id", "file_name"])]
-
-
-def delete_chunks(ws: Workspace, ids: list[str]) -> None:
-    if ids:
-        _client(ws).delete_documents([{"id": chunk_id} for chunk_id in ids])
-
-
 def get_cv_chunks(ws: Workspace, file_id: str) -> list[dict]:
     """Every chunk of one CV in reading order."""
     results = _client(ws).search(
-        "*", filter=file_id_filter([file_id]), select=["chunk_no", "file_name", "file_url", "section", "page", "content", *META_FIELDS], top=1000
+        "*", filter=file_id_filter([file_id]), select=["chunk_no", "file_name", "file_url", "section", "section_type", "page", "content", *META_FIELDS], top=1000
     )
     chunks = sorted(results, key=lambda r: r["chunk_no"])
     return [
-        {"file_name": c["file_name"], "file_url": c.get("file_url") or "", "section": c.get("section") or "", "page": c.get("page"), "content": c["content"], "caption": "",
+        {"file_name": c["file_name"], "file_url": c.get("file_url") or "", "section": c.get("section") or "", "section_type": c.get("section_type") or "other",
+         "chunk_no": c["chunk_no"], "page": c.get("page"), "content": c["content"], "caption": "",
          **{name: c.get(name) for name in META_FIELDS}}
         for c in chunks
     ]
@@ -255,7 +246,7 @@ def hybrid_search(
         search_text=text,
         vector_queries=[VectorizedQuery(vector=vector, k_nearest_neighbors=k, fields="content_vector")],
         filter=" and ".join(f for f in filters if f) or None,
-        select=["file_name", "file_url", "section", "page", "content", *META_FIELDS],
+        select=["file_name", "file_url", "section", "page", "chunk_no", "content", *META_FIELDS],
         scoring_profile=settings.index.scoring_profile,
         scoring_parameters=[f"boostSections-{','.join(boost_sections or settings.sections.boosted)}"],
         top=k,
@@ -284,7 +275,7 @@ def hybrid_search(
         found.append({
             "score": reranker if reranker is not None else result.get("@search.score"),  # how relevant Azure found the chunk
             "file_name": result["file_name"], "file_url": result.get("file_url") or "", "section": result.get("section") or "", "page": result.get("page"),
-            "content": result["content"], "caption": captions[0].text if captions and captions[0].text else "",
+            "chunk_no": result.get("chunk_no"), "content": result["content"], "caption": captions[0].text if captions and captions[0].text else "",
             **{name: result.get(name) for name in META_FIELDS},
         })
     return found

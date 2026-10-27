@@ -1,8 +1,7 @@
-"""Finding CV text for a question: embed, hybrid search, merge several searches, pick the top-k CVs and read them whole."""
+"""Finding CV text for a question: embed, hybrid search, pick the top-k CVs and give the model the sections it needs."""
 import re
 import time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import NamedTuple
 
@@ -46,23 +45,9 @@ def search(
     return record(results)
 
 
-def fuse(result_lists: list[list[dict]]) -> list[dict]:
-    """Reciprocal rank fusion: a chunk scores 1/(RRF_K + rank) in every list it appears in, so chunks that several
-    queries found rise to the top. The order of a single list is kept."""
-    scores: Counter[tuple] = Counter()
-    chunks: dict[tuple, dict] = {}
-    for results in result_lists:
-        for rank, result in enumerate(results, start=1):
-            key = (result["file_name"], result["section"], result["page"], result["content"])
-            scores[key] += 1 / (settings.retrieval.rrf_k + rank)
-            if key not in chunks or (result.get("score") or 0) > (chunks[key].get("score") or 0):
-                chunks[key] = result  # keep the copy with the highest relevance score
-    return [chunks[key] for key, _ in scores.most_common()]
-
-
 class Retrieved(NamedTuple):
-    context: list[dict]  # every chunk of the chosen CVs, best CV first, each CV in reading order: what the model reads
-    matched: list[dict]  # the chunks the searches found in those CVs, best CV first: what the Sources list shows
+    context: list[dict]  # what the model reads: for each of the best CVs, the sections the search found in it (best CV first, each in reading order)
+    sources: list[dict]  # the same chunks, shortened: what the Sources list shows and what is stored with the chat message
 
 
 def best_cvs(results: list[dict], k: int) -> list[str]:
@@ -73,48 +58,41 @@ def best_cvs(results: list[dict], k: int) -> list[str]:
     return sorted(best, key=best.__getitem__, reverse=True)[:k]
 
 
-def load_cvs(ws: Workspace, names: list[str], trace: Trace | None = None) -> list[dict]:
-    """Every chunk of each CV in `names` (in that order), each CV in reading order."""
-    if not names:
-        return []
-    start = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=len(names)) as pool:
-        loaded = list(pool.map(lambda name: search_index.get_cv_chunks(ws, name), names))
-    if trace:
-        trace.add("load", "read whole CVs", (time.perf_counter() - start) * 1000, cvs=len(names), chunks=sum(len(chunks) for chunks in loaded))
-    return [chunk for chunks in loaded for chunk in chunks]
+def shorten(chunk: dict) -> dict:
+    """A copy of a chunk with its text cut to settings.retrieval.source_chars, for the Sources list and for storing."""
+    limit = settings.retrieval.source_chars
+    if len(chunk["content"]) <= limit:
+        return dict(chunk)
+    return {**chunk, "content": chunk["content"][:limit].rstrip() + "…"}
 
 
 def retrieve(
-    ws: Workspace, queries: list[str], sections: list[str], names: list[str], trace: Trace | None = None,
+    ws: Workspace, query: str, sections: list[str], names: list[str], trace: Trace | None = None,
     k: int = settings.retrieval.top_k, scoped: bool = False,
 ) -> Retrieved:
-    """Find the `k` best CVs for the question and return all of their text.
+    """Find the `k` best CVs for the question and the sections of them that the model needs.
 
-    `names` lists the file name of every CV that may answer; scoped=True means the user chose those CVs, so the searches are
-    limited to them. Every query is searched (the first is the main one) and the lists are merged. The first search
-    returns only the best chunks, which can come from a few CVs, so the CVs it missed are searched again (at most cover_rounds
-    times) until `k` CVs, or all of them, are covered.
+    `names` lists the file name of every CV that may answer; scoped=True means the user chose those CVs, so the search is
+    limited to them. The first search returns only the best chunks, which can come from a few CVs, so the CVs it missed are
+    searched again (at most cover_rounds times) until `k` CVs, or all of them, are covered: a question about everyone needs
+    something from each candidate. The model then reads only the chunks the searches found in the best `k` CVs.
     """
     file_ids = names if scoped else None
-    if len(queries) == 1:
-        results = search(ws, queries[0], sections, file_ids, trace=trace)
-    else:
-        with ThreadPoolExecutor(max_workers=len(queries)) as pool:
-            results = fuse(list(pool.map(lambda query: search(ws, query, sections, file_ids, trace=trace), queries)))
     allowed = set(names)
-    results = [result for result in results if result["file_name"] in allowed]
+    results = [result for result in search(ws, query, sections, file_ids, trace=trace) if result["file_name"] in allowed]
     aim = min(k, len(names))
     for _ in range(settings.retrieval.cover_rounds):
         found = {result["file_name"] for result in results}
         missing = [name for name in names if name not in found]
         if len(found) >= aim or not missing:
             break
-        results = results + [result for result in search(ws, queries[0], sections, missing, trace=trace) if result["file_name"] in allowed]
-    best = best_cvs(results, k)
-    rank = {name: position for position, name in enumerate(best)}
-    matched = sorted((result for result in results if result["file_name"] in rank), key=lambda result: rank[result["file_name"]])
-    return Retrieved(load_cvs(ws, best, trace), matched)
+        results = results + [result for result in search(ws, query, sections, missing, trace=trace) if result["file_name"] in allowed]
+    rank = {name: position for position, name in enumerate(best_cvs(results, k))}
+    chosen = sorted(
+        (result for result in results if result["file_name"] in rank),
+        key=lambda result: (rank[result["file_name"]], result.get("chunk_no") is None, result.get("chunk_no") or 0),
+    )
+    return Retrieved(chosen, [shorten(chunk) for chunk in chosen])
 
 
 def _weights(results: list[dict]) -> list[float]:

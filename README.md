@@ -46,7 +46,7 @@ Every answer comes only from the uploaded CVs, is written in the language you as
 - **Cited answers.** Every claim is followed by `[file name, p.N]`, and a **Sources** list shows the excerpt and a signed link to the original file.
 - **Layout-aware reading** with Azure AI Document Intelligence: multi-column CVs come out in reading order, tables become markdown, headings are detected. PDF and DOCX, scans through OCR.
 - **Hybrid retrieval**: keyword + vector search, boosted for names, titles and key sections, re-ranked by Azure's semantic ranker.
-- **Whole CVs, top-k**: a question reads the best `top_k` CVs (everyone questions, default 20) or `top_k_focused` CVs (any other question, default 3), each with **every chunk**, so the model sees a candidate as a whole instead of a few excerpts.
+- **The sections a question needs, top-k**: a question reads the best `top_k` CVs (everyone questions, default 20) or `top_k_focused` CVs (any other question, default 3), and from each only the sections the search found relevant, so token use follows the question and not the size of the CVs.
 - **A router and an agent**: one model call classifies each message (chat, simple, complex, clarify); complex questions go to a capped tool-using agent.
 - **Candidate details without rules**: name, job title, email, phone and location are read by a generic NER model (GLiNER), not by regexes.
 - **Candidates view** with cards, filters and side-by-side comparison, and a **Library** with live ingestion status.
@@ -155,7 +155,7 @@ Each chunk stores the plain Blob address of its CV (`file_url`); the container i
 - A job moves through `queued → processing (stage) → indexed | skipped | failed`. Stages shown live: *saving original → reading layout → reading name, title and contact → embedding → saving*.
 - The Library polls the job list every 2 seconds, and the sidebar shows a progress bar on every page while jobs run.
 - **One failing CV never stops the others** (a scanned PDF with no text, a bad name, a rate limit). A CV that fails after step 3 keeps its stored original, shows in the Library without details, and can be retried with **Re-index**.
-- On submit, if nothing is running, `remove_deleted_cvs` deletes index chunks of CVs whose blob no longer exists (for example deleted in the portal).
+- On submit, if nothing is running, `remove_deleted_cvs` reads one row per indexed CV, compares it with the files in Blob Storage, and removes the chunks of every CV whose file is gone (for example deleted in the portal). Deleting a CV in the Library removes both its chunks and its file (`ingest.delete_cv`: the index first, then the blob, then the cache).
 - **Re-index** passes `data=None`, which downloads the stored original instead of asking for an upload. **Update outdated CVs** re-runs every stored CV; those already current are skipped by the hash check.
 
 ---
@@ -176,12 +176,11 @@ flowchart TD
     RO -- no --> EV
     SC --> EV{"everyone?"}
 
-    EV -- yes --> TK["Top-k retrieval<br/>+ cover missed CVs"]
+    EV -- yes --> TK["Top-k retrieval<br/>+ cover missed CVs, relevant sections"]
     EV -- no --> CX{"complex?"}
     CX -- yes --> AG["Agent<br/>list_cvs · search_cvs · get_cv<br/>5 rounds / 30 s"]
-    CX -- no --> XP["Optional query expansion"]
-    XP --> HS["Hybrid search + semantic ranker<br/>(x queries, fused with RRF)"]
-    HS --> TP["Top-p over CVs, then over excerpts"]
+    CX -- no --> HS["Hybrid search + semantic ranker<br/>(one Azure request)"]
+    HS --> TP["Best CVs (top-k), their relevant sections"]
 
     TK --> GEN
     TP --> GEN["Chat model, streamed<br/>excerpts as data, cited"]
@@ -215,26 +214,21 @@ When `role` is set, [`roles.find`](cv_chat/rag/roles.py) looks for CVs where eve
 
 ### 3. Retrieval
 
-**Normal questions** (`simple`, not `everyone`):
-
-1. **Query expansion** (optional, account menu): two extra queries are generated, a keyword-only one and one worded like a CV would say it.
-2. **Embed** each query (in-memory `lru_cache`).
-3. **Hybrid search** ([`search_index.hybrid_search`](cv_chat/services/search_index.py)): one Azure query that combines
-   - *keyword search* on the English analyzer (`en.microsoft`, stemming and stop words), with the `cv` **scoring profile**: name match ×3, job title ×2, file name ×2, section heading ×1.5, body ×1, plus a +1.5 boost for chunks in the `experience` and `skills` sections;
+1. **Embed** the rewritten question (in-memory `lru_cache`).
+2. **Hybrid search** ([`search_index.hybrid_search`](cv_chat/services/search_index.py)): one Azure request that combines
+   - *keyword search* on the English analyzer (`en.microsoft`, stemming and stop words), with the `cv` **scoring profile**: name match ×3, job title ×2, file name ×2, section heading ×1.5, body ×1, plus a +1.5 boost for chunks in the sections the router picked (the `experience` and `skills` sections when it picked none);
    - *vector search* (HNSW, cosine) over the chunk embeddings;
-   - merged by Azure, then re-ordered by the **semantic ranker** (top 50, `retrieval.search_k`), which also returns the best passage of each chunk (the "caption") for the Sources list.
-4. The whole search is **one Azure request**. If the router picked sections, they are passed as a **boost** (`boostSections` of the scoring profile) and nothing is filtered out, so a CV with unusual headings is still found. On a service without the semantic ranker (Free tier) the first search falls back to plain hybrid search and the app remembers it, so later searches do not try again.
-5. With several queries, result lists are merged by **reciprocal rank fusion**: a chunk scores `1/(60 + rank)` in each list it appears in.
-6. If the service has no semantic ranker (Free tier), it logs a warning and uses plain hybrid search.
+   - merged by Azure, then re-ordered by the **semantic ranker** (top 50, `retrieval.search_k`), which also returns the best passage of each chunk (the "caption").
+3. The sections the router picked are only a **boost** (`boostSections` of the scoring profile); nothing is filtered out, so a CV with unusual headings is still found. On a service without the semantic ranker (Free tier) the first search falls back to plain hybrid search and the app remembers it, so later searches do not try again.
 
-**Choosing the CVs (top-k)** ([`retrieve`](cv_chat/rag/retrieval.py)):
+**Choosing the CVs and the sections (top-k)** ([`retrieve`](cv_chat/rag/retrieval.py)):
 
-1. One search (plus expansions) over the CVs that may answer: all of them, or only the ones the user chose in *Answering from*.
-2. Up to `retrieval.cover_rounds` (3) extra searches, restricted to the CVs the previous results missed, until `min(k, number of CVs)` are covered.
+1. One search over the CVs that may answer: all of them, or only the ones the user chose in *Answering from*.
+2. Up to `retrieval.cover_rounds` (3) extra searches, restricted to the CVs the previous results missed, until `min(k, number of CVs)` are covered. This is what lets a question about everyone get something from each candidate.
 3. A CV is as relevant as its best chunk. The best `k` CVs are kept: `k = top_k` (20) for a question about everyone (`everyone: true`, for example a comparison or a ranking), `top_k_focused` (3) for any other question.
-4. **Every chunk** of each kept CV is loaded from the index and given to the model, best CV first, each CV in reading order. The Sources list shows the chunks the search matched.
+4. The model reads only the chunks (sections) the search found in those CVs, best CV first, each CV in reading order, each chunk in full. The Sources list and the copy stored with the chat message hold the same chunks cut to `retrieval.source_chars` (600) characters.
 
-There is no relevance cut-off and no character budget: a question carries up to `k` complete CVs, so a large `top_k` costs tokens and time. Lower `top_k` or choose CVs in the chat to limit it.
+There is no relevance cut-off and no character budget: the text sent is the sections the search found in up to `k` CVs (at most `search_k` = 50 chunks in all). Lower `top_k` or choose CVs in the chat to send less.
 
 **Complex questions** go to the agent instead.
 
@@ -246,7 +240,7 @@ There is no relevance cut-off and no character budget: a question carries up to 
 |---|---|
 | `list_cvs` | Every CV with the name, title and contact read from it |
 | `search_cvs` | Hybrid search, optionally limited to some CVs, filtered by `job_title` (an Azure `search.ismatch` filter), with `per_cv` (1 to `agent.per_cv_max`) so one search reaches many CVs |
-| `get_cv` | One whole CV in reading order |
+| `get_cv` | Without `sections`: only the outline of one CV (each section's heading, type and size, no text). With `sections` (standard types such as `experience`, `skills`): just those sections, in order. A whole CV is never returned by default |
 
 - At most `agent.max_rounds` (5) rounds and `agent.max_seconds` (30 s). When the budget is used up, it is told to answer from what it found.
 - If the user picked CVs with **Chat with**, the tools cannot reach outside that scope.
@@ -331,7 +325,7 @@ One private container per user (`<AZURE_STORAGE_CONTAINER>-<user id>`) holding t
 - **Sign-up cap.** 15 users (`accounts.max_users`), because each user gets their own search index and the Azure Basic tier allows 15.
 - **Per-user resources.** Sign-up creates the user's Blob container and search index; if either fails the account is not created.
 - **Isolation by construction.** A `Workspace` is built **only** from the logged-in user's UUID (anything else raises) and is passed to every function that touches Azure. Container and index names derive from it, and the answer cache and the ingest queue are per user too. A user's code has no way to name another user's data.
-- **Account menu** (your email at the top of the sidebar): Log out · Recovery code · Chat settings (Query expansion, Cache final answers, Clear cache) · Change password (logs out your other devices) · Delete my account (type your email, enter your password). Deletion removes Azure data first and stops if that fails; it waits for CVs that are being processed.
+
 
 ---
 
@@ -462,8 +456,8 @@ chat-with-cv/
     ├── rag/                    # the two pipelines
     │   ├── ingest.py               # skip check, extract, chunk, embed, save, delete, prepare, destroy
     │   ├── jobs.py                 # background queue, per-file state
-    │   ├── qa.py                   # router, expansion, role check, retrieval, agent, guarded streaming
-    │   ├── retrieval.py            # embed, hybrid search, RRF, top-k, whole-CV loading, excerpt formatting
+    │   ├── qa.py                   # router, role check, retrieval, agent, guarded streaming
+    │   ├── retrieval.py            # embed, hybrid search, top-k CVs and their sections, excerpt formatting
     │   ├── agent.py                # tool-using agent for complex questions
     │   ├── roles.py                # does a requested job role exist in the CVs?
     │   ├── metadata.py             # how a CV's details are shown to the model
@@ -493,13 +487,13 @@ Settings are validated with pydantic ([`cv_chat/config.py`](cv_chat/config.py)).
 | `chunking.max_chars` / `overlap` | `4000` / `400` | A section shorter than this stays one chunk; a longer one is cut with this overlap |
 | `chunking.caps_headings`, `caps_max_words`, `heading_max_chars` | `true`, `5`, `40` | The ALL-CAPS heading fallback and the longest line that can be a heading |
 | `sections.types`, `sections.boosted` | see the file | Heading keywords per standard section (matched from the start of a word) and the sections ranked a little higher |
-| `retrieval.top_k` | `20` | CVs read whole for a question about everyone |
-| `retrieval.top_k_focused` | `3` | CVs read whole for any other question |
+| `retrieval.top_k` | `20` | CVs read (the sections found in them) for a question about everyone |
+| `retrieval.top_k_focused` | `3` | CVs read for any other question |
 | `retrieval.history_chars` | `6000` | Most recent chat sent along with a question |
 | `retrieval.search_k` | `50` | Chunks fetched and re-ranked per search (the semantic ranker's limit) |
 | `retrieval.cover_rounds` | `3` | Extra searches aimed at CVs the first search missed |
-| `retrieval.expanded_queries` | `2` | Alternative queries when **Query expansion** is on |
-| `retrieval.rrf_k` | `60` | Reciprocal rank fusion constant (from the original paper). Leave it |
+| `retrieval.source_chars` | `600` | A source (an excerpt in the Sources list, stored with the chat message) is cut to this many characters |
+| `retrieval.rrf_k` | `60` | Stands in for a missing relevance score (rank-based weight). Leave it |
 | `retrieval.embed_cache_size`, `cache.size` | `256` | Question embeddings kept in memory; entries per kind of cached result |
 | `agent.max_rounds` / `max_seconds` | `5` / `30` | Tool rounds and time budget of the agent |
 | `agent.per_cv_all` / `per_cv_some` / `per_cv_max` | `1` / `2` / `5` | Excerpts per CV from one `search_cvs` call |
@@ -529,7 +523,7 @@ Everything is **in memory, per user, per app process** ([`rag/cache.py`](cv_chat
 | **Router results** | question + recent chat | A `chat` decision on a message that opens a chat is also stored by its text alone; decisions made with a history are never shared |
 | **Chat replies** ("hi", "thanks") | message text | Always on. Written without chat history, so nothing can leak between conversations |
 | **Searches** | query + sections + CV filter + metadata filter | Repeats skip Azure and do not use the semantic ranker quota |
-| **Final answers** | question + recent chat + expansion flag + scope | **Opt-in** (account menu), because a cached answer can be out of date. Clarifying questions are never reused |
+| **Final answers** | question + recent chat + scope | **Opt-in** (account menu), because a cached answer can be out of date. Clarifying questions are never reused |
 | **Query embeddings** | query text | `lru_cache`, `EMBED_CACHE_SIZE` |
 
 **Invalidation.** The user's whole cache is cleared whenever a CV is processed, re-indexed or deleted. Each `put` carries a **generation token** taken before computing; if the cache was cleared in between, the value is dropped, so a result computed while a CV was changing is never stored.
@@ -538,7 +532,7 @@ Everything is **in memory, per user, per app process** ([`rag/cache.py`](cv_chat
 
 ## Observability
 
-Every answer records a [`Trace`](cv_chat/rag/trace.py): the router result, query expansion, each search (query, hits, filters, cached or not, embed time), each agent round and tool call, content-filter events, the wait for the first token and the time to write the answer. It is stored with the message in Postgres and shown in the **Details** panel: *Timeline* (every step with its time and share of the total; parallel searches overlap, so shares can exceed 100%), *Router*, *Searches*, *Agent*, *Excerpts used* and *Settings*.
+Every answer records a [`Trace`](cv_chat/rag/trace.py): the router result, each search (query, hits, filters, cached or not, embed time), each agent round and tool call, content-filter events, the wait for the first token and the time to write the answer. It is stored with the message in Postgres and shown in the **Details** panel: *Timeline* (every step with its time and share of the total; parallel searches overlap, so shares can exceed 100%), *Router*, *Searches*, *Agent*, *Excerpts used* and *Settings*.
 
 To see where time goes in the UI itself, start with `CV_PROFILE=1 streamlit run app.py` (PowerShell: set `$env:CV_PROFILE=1` first). The terminal then prints one line per page run, such as `page run 1830 ms | login check 4 | imports 1210 | prepare workspace 590 | sidebar 18 | view: Chat 12`. Without it nothing is measured.
 
@@ -554,7 +548,7 @@ To see where time goes in the UI itself, start with `CV_PROFILE=1 streamlit run 
 - **Years of experience are not read**; the app does not show or filter by them.
 - **NER accuracy.** On 8 real CVs it found a name, title, email and phone for all 8 and a location for 6, but some answers are wrong: check the Candidates view after uploading. On CPU it takes about 8 seconds per CV; a GPU is used automatically when its kernels are available.
 - **The embedding size is fixed on an index** when it is created. To switch to a model with another size, delete each user's index in the Azure portal and re-process.
-- **Cost and latency.** Every question makes one router call before the search, and the list of your CVs is kept for 60 seconds instead of listing Blob Storage each time. Query expansion adds one call and two searches (answers start 1 to 2 s later). A complex question can take several model calls, often 10 to 30 s. Document Intelligence is billed per page.
+- **Cost and latency.** Every question makes one router call before the search, and the list of your CVs is kept for 60 seconds instead of listing Blob Storage each time. A simple question is one router call, one search and one answer call. A complex question can take several model calls, often 10 to 30 s. Document Intelligence is billed per page.
 - **Delete is permanent**: it removes the original from Blob Storage and the CV from the index.
 - **Starting from an older version of the app** (shared container and index, before per-user resources): re-upload the CVs from a user account, then delete the old container and index in the portal.
 

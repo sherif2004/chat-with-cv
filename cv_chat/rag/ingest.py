@@ -126,9 +126,12 @@ def destroy(ws: Workspace) -> None:
 
 
 def remove_deleted_cvs(ws: Workspace) -> None:
-    """Delete the index chunks of CVs whose file is no longer in Blob Storage (for example deleted in the portal)."""
-    files = set(blob_storage.list_files(ws))
-    search_index.delete_chunks(ws, [chunk_id for chunk_id, name in search_index.list_chunks(ws) if name not in files])
+    """Remove from the search index the CVs whose file is no longer in Blob Storage (for example deleted in the portal)."""
+    gone = set(search_index.list_profiles(ws)) - set(blob_storage.list_files(ws))
+    for name in sorted(gone):
+        search_index.delete_file_chunks(ws, name)
+    if gone:
+        cache_for(ws).clear()
 
 
 def list_cvs(ws: Workspace) -> list[str]:

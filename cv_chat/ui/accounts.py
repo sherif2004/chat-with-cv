@@ -145,11 +145,6 @@ def account_menu(user: auth.User) -> None:
             help="Adds a Details panel under each answer: how the question was routed, what was searched, the settings used and where the time went.",
         )
         st.toggle(
-            "Query expansion", key="expand_queries",
-            help="Also search two reworded versions of each question and merge the results. "
-            "Finds more, but answers start 1 to 2 seconds later and each question uses three semantic searches.",
-        )
-        st.toggle(
             "Cache final answers", key="cache_answers",
             help="Reuse the answer to an identical question in an identical chat. Off by default: a cached answer can be out of date.",
         )

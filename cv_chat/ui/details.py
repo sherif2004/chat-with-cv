@@ -5,8 +5,8 @@ from cv_chat.ui.safe import code, esc
 
 ROUTE_NAMES = {"chat": "Chat message", "simple": "Simple question", "complex": "Complex question"}
 STAGE_NAMES = {
-    "route": "Router", "expand": "Query expansion", "search": "Search", "agent_model": "Agent (model)", "tool": "Agent (tool)",
-    "load": "Read CVs", "model": "Model (starting)", "cache": "Cache", "filter": "Safety filter", "generate": "Write answer",
+    "route": "Router", "search": "Search", "agent_model": "Agent (model)", "tool": "Agent (tool)",
+    "model": "Model (starting)", "cache": "Cache", "filter": "Safety filter", "generate": "Write answer",
 }
 
 
@@ -46,7 +46,7 @@ def render(trace: dict | None, sources: list[dict]) -> None:
     with tab["Router"]:
         _router(events, route)
     with tab["Searches"]:
-        _searches(events, trace["settings"]["query_expansion"])
+        _searches(events)
     if has_agent:
         with tab["Agent"]:
             _agent(events)
@@ -66,8 +66,6 @@ def _detail(event: dict) -> str:
         return f"{event['label']}: {info.get('decision') or info.get('error', '')}"
     if stage == "tool":
         return event["label"] + (f" · {info['cv']}" if info.get("cv") else "")
-    if stage == "expand":
-        return f"{len(info['queries'])} extra queries" if info["queries"] else "no extra queries (call failed)" if info.get("failed") else "no extra queries"
     if stage == "filter":
         return "left out: " + ", ".join(info["left_out"])
     if stage == "model":
@@ -109,12 +107,7 @@ def _router(events: list[dict], route: str) -> None:
     st.caption("chat: no search · simple: one search · complex: handled by the search agent")
 
 
-def _searches(events: list[dict], expansion: bool) -> None:
-    expand = next((e for e in events if e["stage"] == "expand"), None)
-    if expand and expand["info"]["queries"]:
-        st.markdown("**Reworded queries** (" + fmt(expand["ms"]) + "): " + " · ".join(code(q) for q in expand["info"]["queries"]))
-    elif expansion:
-        st.caption("Query expansion was on but produced no extra queries.")
+def _searches(events: list[dict]) -> None:
     searches = [e for e in events if e["stage"] == "search"]
     if not searches:
         st.caption("No search was needed for this message.")
@@ -149,7 +142,7 @@ def _excerpts(sources: list[dict]) -> None:
         st.caption("No CV excerpts were used.")
         return
     files = {s["file_name"] for s in sources}
-    st.caption(f"{len(sources)} excerpt{'' if len(sources) == 1 else 's'} from {len(files)} CV{'' if len(files) == 1 else 's'} went to the model.")
+    st.caption(f"{len(sources)} section{'' if len(sources) == 1 else 's'} from {len(files)} CV{'' if len(files) == 1 else 's'} went to the model (the model read each in full; the stored copy is shortened).")
     for s in sources:
         page = f" · p.{s['page']}" if s.get("page") else ""
         who = f" · {esc(s['candidate_name'])}" if s.get("candidate_name") else ""
@@ -163,6 +156,5 @@ def _settings(trace: dict) -> None:
     settings, models = trace["settings"], trace["models"]
     st.markdown(
         f"- Chat model deployment: {code(models['chat'])}\n- Embedding deployment: {code(models['embedding'])}\n"
-        f"- Query expansion: {'on' if settings['query_expansion'] else 'off'}\n"
         f"- Answer cache: {'on' if settings['answer_cache'] else 'off'}"
     )

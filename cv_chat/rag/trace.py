@@ -11,20 +11,20 @@ from cv_chat.config import settings
 
 
 class Trace:
-    def __init__(self, expand: bool = False, cache_answers: bool = False):
+    def __init__(self, cache_answers: bool = False):
         self._start = time.perf_counter()
         self._lock = threading.Lock()
         self._events: list[dict] = []
         self.route = ""
         self.total_ms: float | None = None
         self.first_token_ms: float | None = None
-        self.settings = {"query_expansion": expand, "answer_cache": cache_answers}
+        self.settings = {"answer_cache": cache_answers}
 
     def now_ms(self) -> float:
         return (time.perf_counter() - self._start) * 1000
 
     def add(self, stage: str, label: str, ms: float, **info) -> None:
-        """stage: route | expand | search | agent_model | tool | cache | filter | generate."""
+        """stage: route | search | agent_model | tool | cache | filter | generate."""
         with self._lock:
             self._events.append({"stage": stage, "label": label, "at_ms": round(self.now_ms() - ms, 1), "ms": round(ms, 1), "info": info})
 

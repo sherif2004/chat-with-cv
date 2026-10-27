@@ -97,9 +97,9 @@ class RetrievalSettings(_Group):
     top_k: int = Field(20, ge=1)  # CVs read whole for a question about everyone (a comparison, a ranking, a list)
     top_k_focused: int = Field(3, ge=1)  # CVs read whole for any other question
     history_chars: int = Field(6000, ge=0)  # the most recent chat sent along with a question
+    source_chars: int = Field(600, ge=100)  # a source (an excerpt in the Sources list, stored with the chat) is cut to this many characters
     search_k: int = Field(50, ge=1, le=50)  # chunks fetched and re-ranked per search (50 is the semantic ranker's limit)
     cover_rounds: int = Field(3, ge=0)  # extra searches aimed at the CVs the first search missed
-    expanded_queries: int = Field(2, ge=0)  # alternative queries searched when query expansion is on
     rrf_k: int = Field(60, ge=1)  # reciprocal rank fusion constant: higher flattens the difference between ranks
     embed_cache_size: int = Field(256, ge=0)  # question embeddings kept in memory
 
