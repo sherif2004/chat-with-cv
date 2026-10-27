@@ -199,8 +199,9 @@ def get_hash(ws: Workspace, file_id: str) -> str | None:
 
 
 def delete_stale_chunks(ws: Workspace, file_id: str, keep_ids: set[str]) -> None:
-    """After re-indexing a changed file: drop chunks the new version no longer has."""
-    results = _client(ws).search("*", filter=file_id_filter([file_id]), select=["id"])
+    """After re-indexing a changed file: drop chunks the new version no longer has. Found by file name, which every chunk
+    has had since the first version, so chunks written under an older id scheme are cleaned up too."""
+    results = _client(ws).search("*", filter=f"file_name eq {odata_string(file_id)}", select=["id"])
     stale = [{"id": result["id"]} for result in results if result["id"] not in keep_ids]
     for start in range(0, len(stale), 500):
         _client(ws).delete_documents(stale[start : start + 500])
