@@ -1,11 +1,10 @@
-"""Finding CV chunks for a question: embed, hybrid search, merge several searches, spread over CVs."""
-import math
+"""Finding CV text for a question: embed, hybrid search, merge several searches, pick the top-k CVs and read them whole."""
 import re
-import statistics
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+from typing import NamedTuple
 
 from cv_chat.config import settings
 from cv_chat.rag import metadata
@@ -61,62 +60,60 @@ def fuse(result_lists: list[list[dict]]) -> list[dict]:
     return [chunks[key] for key, _ in scores.most_common()]
 
 
+class Retrieved(NamedTuple):
+    context: list[dict]  # every chunk of the chosen CVs, best CV first, each CV in reading order: what the model reads
+    matched: list[dict]  # the chunks the searches found in those CVs, best CV first: what the Sources list shows
+
+
+def best_cvs(results: list[dict], k: int) -> list[str]:
+    """File names of the best `k` CVs, best first. A CV is as relevant as its best chunk."""
+    best: dict[str, float] = {}
+    for weight, chunk in zip(_weights(results), results):
+        best[chunk["file_name"]] = max(best.get(chunk["file_name"], 0.0), weight)
+    return sorted(best, key=best.__getitem__, reverse=True)[:k]
+
+
+def load_cvs(ws: Workspace, names: list[str], cvs: dict[str, str], trace: Trace | None = None) -> list[dict]:
+    """Every chunk of each CV in `names` (in that order), each CV in reading order. `cvs` maps a file name to its file id."""
+    if not names:
+        return []
+    start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=len(names)) as pool:
+        loaded = list(pool.map(lambda name: search_index.get_cv_chunks(ws, cvs[name]), names))
+    if trace:
+        trace.add("load", "read whole CVs", (time.perf_counter() - start) * 1000, cvs=len(names), chunks=sum(len(chunks) for chunks in loaded))
+    return [chunk for chunks in loaded for chunk in chunks]
+
+
 def retrieve(
-    ws: Workspace, queries: list[str], sections: list[str], trace: Trace | None = None, file_ids: list[str] | None = None,
-) -> list[dict]:
-    """Search every query (the first is the main one), merge the lists, then keep the relevant candidates and their relevant
-    excerpts (see rank_cvs). file_ids limits it to those CVs."""
+    ws: Workspace, queries: list[str], sections: list[str], cvs: dict[str, str], trace: Trace | None = None,
+    k: int = settings.retrieval.top_k, scoped: bool = False,
+) -> Retrieved:
+    """Find the `k` best CVs for the question and return all of their text.
+
+    `cvs` maps the file name of every CV that may answer to its file id; scoped=True means the user chose those CVs, so the
+    searches are limited to them. Every query is searched (the first is the main one) and the lists are merged. The first search
+    returns only the best chunks, which can come from a few CVs, so the CVs it missed are searched again (at most cover_rounds
+    times) until `k` CVs, or all of them, are covered.
+    """
+    file_ids = list(cvs.values()) if scoped else None
     if len(queries) == 1:
         results = search(ws, queries[0], sections, file_ids, trace=trace)
     else:
         with ThreadPoolExecutor(max_workers=len(queries)) as pool:
             results = fuse(list(pool.map(lambda query: search(ws, query, sections, file_ids, trace=trace), queries)))
-    return rank_cvs(results)
-
-
-def retrieve_top_k(
-    ws: Workspace, queries: list[str], sections: list[str], cvs: dict[str, str], trace: Trace | None = None,
-    k: int = settings.retrieval.top_k, budget: int = settings.retrieval.context_chars,
-) -> list[dict]:
-    """For a question about everyone (a comparison, a ranking): a fixed number of candidates instead of top-p, so none is dropped
-    for scoring lower than the best. `cvs` maps each candidate's file name to its file id.
-    The first search returns only the best 50 chunks, which can come from a few CVs, so the CVs it missed are searched
-    again (at most COVER_ROUNDS times) until k CVs, or all of them, are covered."""
-    if len(queries) == 1:
-        results = search(ws, queries[0], sections, None, trace=trace)
-    else:
-        with ThreadPoolExecutor(max_workers=len(queries)) as pool:
-            results = fuse(list(pool.map(lambda query: search(ws, query, sections, None, trace=trace), queries)))
+    results = [result for result in results if result["file_name"] in cvs]
     aim = min(k, len(cvs))
     for _ in range(settings.retrieval.cover_rounds):
         found = {result["file_name"] for result in results}
         missing = [file_id for name, file_id in cvs.items() if name not in found]
         if len(found) >= aim or not missing:
             break
-        results = results + search(ws, queries[0], sections, missing, trace=trace)
-    return rank_top_k(results, k, budget)
-
-
-def rank_top_k(results: list[dict], k: int, budget: int) -> list[dict]:
-    """The best `k` CVs (a CV is as relevant as its best chunk), each with an equal share of `budget` characters filled with
-    its most relevant chunks (at least one). Best CV first, each CV's chunks in reading order."""
-    if not results:
-        return []
-    groups: dict[str, list[tuple[float, dict]]] = {}
-    for weight, chunk in zip(_weights(results), results):
-        groups.setdefault(chunk["file_name"], []).append((weight, chunk))
-    cvs = sorted((sorted(group, key=lambda item: -item[0]) for group in groups.values()), key=lambda group: -group[0][0])[:k]
-    share = budget // len(cvs)
-    picked = []
-    for group in cvs:
-        kept, used = [], 0
-        for _, chunk in group:
-            if kept and used + len(chunk["content"]) > share:
-                break
-            kept.append(chunk)
-            used += len(chunk["content"])
-        picked += sorted(kept, key=lambda chunk: (chunk.get("page") is None, chunk.get("page") or 0))
-    return picked
+        results = results + [result for result in search(ws, queries[0], sections, missing, trace=trace) if result["file_name"] in cvs]
+    names = best_cvs(results, k)
+    rank = {name: position for position, name in enumerate(names)}
+    matched = sorted((result for result in results if result["file_name"] in rank), key=lambda result: rank[result["file_name"]])
+    return Retrieved(load_cvs(ws, names, cvs, trace), matched)
 
 
 def _hybrid(ws: Workspace, query: str, vector: list[float], sections: list[str], file_ids: list[str] | None, where: str | None) -> list[dict]:
@@ -133,76 +130,24 @@ def _hybrid(ws: Workspace, query: str, vector: list[float], sections: list[str],
 def _weights(results: list[dict]) -> list[float]:
     """How relevant each result is, from 0 to 1 (its score divided by the best score). Without scores (the search service
     returned none) the rank stands in for them, which makes every result look about equally relevant."""
+    if not results:
+        return []
     scores = [result.get("score") for result in results]
-    if not results or any(score is None or score <= 0 for score in scores):
+    if any(score is None or score <= 0 for score in scores):
         scores = [1 / (settings.retrieval.rrf_k + rank) for rank in range(1, len(results) + 1)]
     best = max(scores)
     return [score / best for score in scores]
 
 
-def _temperature(weights: list[float]) -> float:
-    """How sharply a higher relevance is favoured, taken from how spread out this search's relevances are: a search with one
-    clear winner among weak results has a wide spread, so the winner takes most of the share; a search whose results are all
-    alike has none, so they share it. A small floor keeps a perfectly flat list from dividing by zero."""
-    return max(statistics.pstdev(weights), 0.05)
-
-
-def _nucleus(weights: list[float], top_p: float, temperature: float) -> int:
-    """How many of the weights (best first) to keep: the fewest that hold `top_p` of the total share, and at least one.
-    A share is the weight's softmax, so a clear winner takes most of it and a close field shares it."""
-    top = max(weights)
-    exps = [math.exp((weight - top) / temperature) for weight in weights]  # relative to the best, so nothing overflows
-    total = sum(exps)
-    covered = 0.0
-    for count, value in enumerate(exps, start=1):
-        covered += value / total
-        if covered >= top_p:
-            return count
-    return len(weights)
-
-
-def rank_cvs(results: list[dict], top_p: float = settings.retrieval.top_p, budget: int = settings.retrieval.context_chars) -> list[dict]:
-    """Keep what is relevant instead of a fixed number. Top-p is applied twice:
-    - candidates: a CV is as relevant as its best chunk; the best CVs are kept until they hold `top_p` of the relevance,
-      so a question about one person keeps one or two and a broad question keeps many;
-    - excerpts: for each kept CV, its best chunks are kept the same way.
-    Then excerpts are added, most relevant CV first, until `budget` characters are used (the first excerpt always goes in).
-    The result lists the CVs best first, each with its chunks in reading order, so the model sees a candidate's excerpts together."""
-    if not results:
-        return []
-    weights = _weights(results)
-    temperature = _temperature(weights)
-    groups: dict[str, list[tuple[float, dict]]] = {}
-    for weight, chunk in zip(weights, results):
-        groups.setdefault(chunk["file_name"], []).append((weight, chunk))
-    cvs = sorted(((max(w for w, _ in group), sorted(group, key=lambda item: -item[0])) for group in groups.values()), key=lambda cv: -cv[0])
-    picked, used = [], 0
-    for _, group in cvs[: _nucleus([best for best, _ in cvs], top_p, temperature)]:
-        kept = []
-        for _, chunk in group[: _nucleus([weight for weight, _ in group], top_p, temperature)]:
-            if (picked or kept) and used + len(chunk["content"]) > budget:
-                break
-            kept.append(chunk)
-            used += len(chunk["content"])
-        picked += sorted(kept, key=lambda chunk: (chunk.get("page") is None, chunk.get("page") or 0))
-        if used >= budget:
-            break
-    return picked
-
-
-def spread_over_cvs(results: list[dict], per_cv: int, budget: int) -> list[dict]:
-    """Keep the ranking but allow each CV only a few chunks, so a search reaches many CVs (used by the agent), until `budget`
-    characters of text are used (the first result always goes in)."""
+def spread_over_cvs(results: list[dict], per_cv: int) -> list[dict]:
+    """Keep the ranking but allow each CV only `per_cv` chunks, so a search reaches many CVs (used by the agent)."""
     taken: Counter[str] = Counter()
-    picked, used = [], 0
+    picked = []
     for result in results:
         if taken[result["file_name"]] >= per_cv:
             continue
-        if picked and used + len(result["content"]) > budget:
-            break
         taken[result["file_name"]] += 1
         picked.append(result)
-        used += len(result["content"])
     return picked
 
 

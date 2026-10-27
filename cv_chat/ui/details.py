@@ -6,7 +6,7 @@ from cv_chat.ui.safe import code, esc
 ROUTE_NAMES = {"chat": "Chat message", "simple": "Simple question", "complex": "Complex question"}
 STAGE_NAMES = {
     "route": "Router", "expand": "Query expansion", "search": "Search", "agent_model": "Agent (model)", "tool": "Agent (tool)",
-    "model": "Model (starting)", "cache": "Cache", "filter": "Safety filter", "generate": "Write answer",
+    "load": "Read CVs", "model": "Model (starting)", "cache": "Cache", "filter": "Safety filter", "generate": "Write answer",
 }
 
 

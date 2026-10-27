@@ -2,7 +2,7 @@
 import os
 
 AZURE_ENV = {
-    "AZURE_STORAGE_CONNECTION_STRING": "UseDevelopmentStorage=true",
+    "AZURE_STORAGE_CONNECTION_STRING": "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=Zm9v;EndpointSuffix=core.windows.net",
     "AZURE_STORAGE_CONTAINER": "cvs",
     "AZURE_SEARCH_ENDPOINT": "https://search.example.net",
     "AZURE_SEARCH_KEY": "search-key",

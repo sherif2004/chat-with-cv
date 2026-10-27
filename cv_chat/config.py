@@ -7,7 +7,7 @@ that names all of it; settings_error.describe turns it into a message for the sc
 import re
 from pathlib import Path
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -64,9 +64,8 @@ class ChunkingSettings(_Group):
 
 
 class RetrievalSettings(_Group):
-    top_k: int = Field(20, ge=1)  # most candidates a question about everyone covers
-    top_p: float = Field(0.8, gt=0, le=1)  # share of the relevance the kept candidates and excerpts must hold
-    context_chars: int = Field(36000, ge=1000)  # most CV text sent to the chat model for one question
+    top_k: int = Field(20, ge=1)  # CVs read whole for a question about everyone (a comparison, a ranking, a list)
+    top_k_focused: int = Field(3, ge=1)  # CVs read whole for any other question
     history_chars: int = Field(6000, ge=0)  # the most recent chat sent along with a question
     search_k: int = Field(50, ge=1, le=50)  # chunks fetched and re-ranked per search (50 is the semantic ranker's limit)
     cover_rounds: int = Field(3, ge=0)  # extra searches aimed at the CVs the first search missed

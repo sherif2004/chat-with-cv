@@ -177,21 +177,26 @@ def _unflagged(sources: list[dict], messages_for: Callable[[list[dict]], list[di
     return _unflagged(sources[:middle], messages_for) + _unflagged(sources[middle:], messages_for)
 
 
-def _guarded(sources: list[dict], messages_for: Callable[[list[dict]], list[dict]], trace: Trace | None = None) -> Iterator[str]:
+def _guarded(
+    chunks: list[dict], messages_for: Callable[[list[dict]], list[dict]], trace: Trace | None = None, sources: list[dict] | None = None
+) -> Iterator[str]:
     """Stream the answer. If Azure's content filter refuses the excerpts, answer without the flagged ones and say so.
 
-    `sources` is trimmed in place to the excerpts actually used, so the Sources list stays honest.
+    `chunks` is trimmed in place to the excerpts actually used, and so is `sources` (the Sources list), which stays honest.
     """
-    stream = openai_service.chat_stream(messages_for(sources))
+    stream = openai_service.chat_stream(messages_for(chunks))
     try:
         first = next(stream, None)
     except openai_service.ContentFilterError:
-        kept = _unflagged(sources, messages_for)
-        names = sorted({s["file_name"] for s in sources if s not in kept})
+        kept = _unflagged(chunks, messages_for)
+        names = sorted({s["file_name"] for s in chunks if s not in kept})
         log.warning("content filter refused excerpts from %s", names)
         if trace:
             trace.add("filter", "content filter", 0, left_out=names)
-        sources[:] = kept
+        chunks[:] = kept
+        if sources is not None:
+            used = {(chunk["file_name"], chunk["content"]) for chunk in kept}
+            sources[:] = [source for source in sources if (source["file_name"], source["content"]) in used]
         if not kept:
             yield "Azure's content safety filter refused every excerpt found for this question, so I cannot answer it."
             return
@@ -294,21 +299,15 @@ def _answer(
             if not have:
                 return Answer(iter([roles.missing_message(route.role, titles)]), [], "role_missing")
             scope = have
-    sources = _everyone(ws, route, expand, scope, on_step, trace) if route.everyone else None
-    if sources is None:
-        if route.kind == "complex":  # needs more than the best chunks: let the agent plan its own searches
-            on_step("Complex question: planning the searches")
-            try:
-                return Answer(*agent.run(ws, route.query, _recent(history), on_step, trace, original=question, scope=scope), "complex")
-            except Exception as error:  # fall back to the plain flow rather than lose the answer
-                log.warning("agent failed, using a single search: %s", error)
-                trace.add("agent_model", "agent failed", 0, error=str(error).splitlines()[0] if str(error) else type(error).__name__)
-        if expand:
-            on_step("Rewording the question for a wider search")
-        queries = [route.query, *(_expand(route.query, trace) if expand else [])]
-        on_step(f"Searching the CVs with {len(queries)} quer{'y' if len(queries) == 1 else 'ies'}")
-        file_ids = [ingest.file_id_for(name) for name in scope] or None
-        sources = retrieval.retrieve(ws, queries, route.sections, trace, file_ids)
+    if route.kind == "complex" and not route.everyone:  # needs more than the best CVs: let the agent plan its own searches
+        on_step("Complex question: planning the searches")
+        try:
+            return Answer(*agent.run(ws, route.query, _recent(history), on_step, trace, original=question, scope=scope), "complex")
+        except Exception as error:  # fall back to the plain flow rather than lose the answer
+            log.warning("agent failed, using a single search: %s", error)
+            trace.add("agent_model", "agent failed", 0, error=str(error).splitlines()[0] if str(error) else type(error).__name__)
+    found = _read_cvs(ws, route, expand, scope, on_step, trace)
+    context, sources = found.context, found.matched
     recent = _recent(history)
 
     def messages_for(chosen: list[dict]) -> list[dict]:
@@ -319,20 +318,22 @@ def _answer(
             {"role": "user", "content": f"CV excerpts:\n\n{excerpts}\n\nQuestion: {question}"},
         ]
 
-    return Answer(_guarded(sources, messages_for, trace), sources, "simple")
+    return Answer(_guarded(context, messages_for, trace, sources), sources, "simple")
 
 
-def _everyone(ws: Workspace, route: Route, expand: bool, scope: list[str], on_step: Callable[[str], None], trace: Trace) -> list[dict] | None:
-    """Excerpts for a question about everyone: a fixed number of candidates (top-k) instead of top-p, found in one search plus
-    a search for the CVs it missed. None when that is not possible (no CVs, or a failure), so the normal flow answers instead."""
-    try:
-        names = [name for name in ingest.list_cvs(ws) if not scope or name in scope]
-        if not names:
-            return None
-        on_step(f"Question about everyone: reading up to {min(settings.retrieval.top_k, len(names))} of {len(names)} CVs")
-        queries = [route.query, *(_expand(route.query, trace) if expand else [])]
-        sources = retrieval.retrieve_top_k(ws, queries, route.sections, {name: ingest.file_id_for(name) for name in names}, trace)
-        return sources or None
-    except Exception as error:  # this only widens the coverage, so a failure must never block the answer
-        log.warning("top-k retrieval failed, using the normal flow: %s", error)
-        return None
+def _read_cvs(
+    ws: Workspace, route: Route, expand: bool, scope: list[str], on_step: Callable[[str], None], trace: Trace
+) -> retrieval.Retrieved:
+    """The text for the answer: the top-k CVs for this question, read whole. A question about everyone reads `top_k` CVs, any
+    other question `top_k_focused`. scope (the CVs the user chose) limits both the searches and the CVs that can be read."""
+    names = [name for name in ingest.list_cvs(ws) if not scope or name in scope]
+    if not names:
+        return retrieval.Retrieved([], [])
+    k = settings.retrieval.top_k if route.everyone else settings.retrieval.top_k_focused
+    if expand:
+        on_step("Rewording the question for a wider search")
+    queries = [route.query, *(_expand(route.query, trace) if expand else [])]
+    reading = f"reading up to {min(k, len(names))} of {len(names)} CVs"
+    on_step(f"Question about everyone: {reading}" if route.everyone else f"Searching the CVs with {len(queries)} quer{'y' if len(queries) == 1 else 'ies'}, {reading}")
+    cvs = {name: ingest.file_id_for(name) for name in names}
+    return retrieval.retrieve(ws, queries, route.sections, cvs, trace, k, scoped=bool(scope))
