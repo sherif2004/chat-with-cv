@@ -82,6 +82,10 @@ class EntitiesSettings(_Group):
     model: str = "urchade/gliner_medium-v2.1"  # generic NER (GLiNER medium, Apache-2.0, 1.5 GB): name, title, email, phone, location
 
 
+class IngestSettings(_Group):
+    max_name_bytes: int = Field(255, ge=1, le=255)  # a file name, in UTF-8; the search key made from it must stay under Azure's 1024 limit
+
+
 class AgentSettings(_Group):
     max_rounds: int = Field(5, ge=1)  # tool-using rounds the agent may take for one complex question
     max_seconds: int = Field(30, ge=1)  # time budget for those rounds; afterwards it answers from what it has found
@@ -101,6 +105,7 @@ class Settings(BaseSettings):
     retrieval: RetrievalSettings = RetrievalSettings()
     extraction: ExtractionSettings = ExtractionSettings()
     entities: EntitiesSettings = EntitiesSettings()
+    ingest: IngestSettings = IngestSettings()
     agent: AgentSettings = AgentSettings()
     cache: CacheSettings = CacheSettings()
 

@@ -17,14 +17,15 @@ from cv_chat.services import blob_storage, openai_service, search_index
 from cv_chat.workspace import Workspace
 
 
-INDEX_VERSION = 2  # bump when the stored chunk fields change: older CVs then show up as outdated and are re-indexed
-MAX_NAME_LENGTH = 200
+INDEX_VERSION = 3  # bump when the stored chunk fields change: older CVs then show up as outdated and are re-indexed
 
 
 def validate_file_name(file_name: str) -> None:
-    """Upload names come from the browser, so refuse anything that is not a plain file name. Raises ValueError."""
-    if not file_name or not file_name.strip() or len(file_name) > MAX_NAME_LENGTH:
-        raise ValueError(f"The file name must be 1 to {MAX_NAME_LENGTH} characters.")
+    """Upload names come from the browser, so refuse anything that is not a plain file name. Raises ValueError.
+    The name is the CV's id everywhere (search index, filters), so it is kept short enough to make a valid search key."""
+    limit = settings.ingest.max_name_bytes
+    if not file_name or not file_name.strip() or len(file_name.encode()) > limit:
+        raise ValueError(f"The file name must be 1 to {limit} bytes long (about {limit // 2} letters in Arabic or Chinese).")
     if "/" in file_name or "\\" in file_name or file_name.strip() in (".", ".."):
         raise ValueError("The file name must not contain / or \\ or be . or ..")
     if any(ord(char) < 32 or ord(char) == 127 for char in file_name):
@@ -40,11 +41,6 @@ def _pipeline_fingerprint() -> bytes:
     return digest.digest()
 
 
-def file_id_for(file_name: str) -> str:
-    """Stable id per file: processing the same file again overwrites its chunks instead of duplicating them."""
-    return hashlib.md5(file_name.encode()).hexdigest()
-
-
 def process_cv(
     ws: Workspace, file_name: str, data: bytes, force: bool = False, on_stage: Callable[[str], None] = lambda stage: None
 ) -> tuple[int, bool]:
@@ -53,9 +49,8 @@ def process_cv(
     on_stage is told what the CV is doing, for the live status in the sidebar.
     """
     validate_file_name(file_name)
-    file_id = file_id_for(file_name)
     content_hash = hashlib.md5(data + _pipeline_fingerprint()).hexdigest()
-    if not force and search_index.get_hash(ws, file_id) == content_hash:
+    if not force and search_index.get_hash(ws, file_name) == content_hash:
         return 0, True
 
     on_stage("saving original")
@@ -76,7 +71,7 @@ def process_cv(
     file_url = blob_storage.blob_url(ws, file_name)
     docs = [
         {
-            "id": f"{file_id}-{i}", "file_id": file_id, "file_name": file_name, "file_url": file_url,
+            "id": search_index.chunk_key(file_name, i), "file_id": file_name, "file_name": file_name, "file_url": file_url,
             "section": chunk.section, "section_type": section_type(chunk.section), "page": chunk.page,
             "content": chunk.text, "content_hash": content_hash, "content_vector": vector, **meta,
         }
@@ -84,7 +79,7 @@ def process_cv(
     ]
     on_stage("saving")
     search_index.upload_chunks(ws, docs)  # upload first, then drop leftovers, so the CV is never missing from the index
-    search_index.delete_stale_chunks(ws, file_id, {doc["id"] for doc in docs})
+    search_index.delete_stale_chunks(ws, file_name, {doc["id"] for doc in docs})
     cache_for(ws).clear()  # cached searches and answers may not know this CV's new content
     return len(chunks), False
 
@@ -92,7 +87,7 @@ def process_cv(
 def delete_cv(ws: Workspace, file_name: str) -> None:
     """Remove a CV everywhere. The index goes first: a CV left in the index but not in storage would still be quoted."""
     try:
-        search_index.delete_file_chunks(ws, file_id_for(file_name))
+        search_index.delete_file_chunks(ws, file_name)
         blob_storage.delete_file(ws, file_name)
     finally:  # even a half-finished delete changes what a search returns
         cache_for(ws).clear()

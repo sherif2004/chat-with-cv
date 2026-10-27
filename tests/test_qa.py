@@ -45,12 +45,12 @@ def test_any_other_question_reads_top_k_focused_cvs(ws, spy):
 
 def test_the_chosen_cvs_limit_what_can_be_read(ws, spy):
     qa._read_cvs(ws, qa.Route("simple", "q", []), False, ["b.pdf"], lambda step: None, qa.Trace())
-    assert list(spy.calls[0]["cvs"]) == ["b.pdf"] and spy.calls[0]["scoped"] is True
+    assert spy.calls[0]["cvs"] == ["b.pdf"] and spy.calls[0]["scoped"] is True
 
 
 def test_with_no_choice_every_cv_can_be_read_and_the_search_is_not_scoped(ws, spy):
     qa._read_cvs(ws, qa.Route("simple", "q", []), False, [], lambda step: None, qa.Trace())
-    assert list(spy.calls[0]["cvs"]) == ["a.pdf", "b.pdf", "c.pdf"] and spy.calls[0]["scoped"] is False
+    assert spy.calls[0]["cvs"] == ["a.pdf", "b.pdf", "c.pdf"] and spy.calls[0]["scoped"] is False
 
 
 def test_no_cvs_means_no_search(ws, spy, monkeypatch):

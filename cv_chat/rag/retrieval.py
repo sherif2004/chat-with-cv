@@ -73,47 +73,48 @@ def best_cvs(results: list[dict], k: int) -> list[str]:
     return sorted(best, key=best.__getitem__, reverse=True)[:k]
 
 
-def load_cvs(ws: Workspace, names: list[str], cvs: dict[str, str], trace: Trace | None = None) -> list[dict]:
-    """Every chunk of each CV in `names` (in that order), each CV in reading order. `cvs` maps a file name to its file id."""
+def load_cvs(ws: Workspace, names: list[str], trace: Trace | None = None) -> list[dict]:
+    """Every chunk of each CV in `names` (in that order), each CV in reading order."""
     if not names:
         return []
     start = time.perf_counter()
     with ThreadPoolExecutor(max_workers=len(names)) as pool:
-        loaded = list(pool.map(lambda name: search_index.get_cv_chunks(ws, cvs[name]), names))
+        loaded = list(pool.map(lambda name: search_index.get_cv_chunks(ws, name), names))
     if trace:
         trace.add("load", "read whole CVs", (time.perf_counter() - start) * 1000, cvs=len(names), chunks=sum(len(chunks) for chunks in loaded))
     return [chunk for chunks in loaded for chunk in chunks]
 
 
 def retrieve(
-    ws: Workspace, queries: list[str], sections: list[str], cvs: dict[str, str], trace: Trace | None = None,
+    ws: Workspace, queries: list[str], sections: list[str], names: list[str], trace: Trace | None = None,
     k: int = settings.retrieval.top_k, scoped: bool = False,
 ) -> Retrieved:
     """Find the `k` best CVs for the question and return all of their text.
 
-    `cvs` maps the file name of every CV that may answer to its file id; scoped=True means the user chose those CVs, so the
-    searches are limited to them. Every query is searched (the first is the main one) and the lists are merged. The first search
+    `names` lists the file name of every CV that may answer; scoped=True means the user chose those CVs, so the searches are
+    limited to them. Every query is searched (the first is the main one) and the lists are merged. The first search
     returns only the best chunks, which can come from a few CVs, so the CVs it missed are searched again (at most cover_rounds
     times) until `k` CVs, or all of them, are covered.
     """
-    file_ids = list(cvs.values()) if scoped else None
+    file_ids = names if scoped else None
     if len(queries) == 1:
         results = search(ws, queries[0], sections, file_ids, trace=trace)
     else:
         with ThreadPoolExecutor(max_workers=len(queries)) as pool:
             results = fuse(list(pool.map(lambda query: search(ws, query, sections, file_ids, trace=trace), queries)))
-    results = [result for result in results if result["file_name"] in cvs]
-    aim = min(k, len(cvs))
+    allowed = set(names)
+    results = [result for result in results if result["file_name"] in allowed]
+    aim = min(k, len(names))
     for _ in range(settings.retrieval.cover_rounds):
         found = {result["file_name"] for result in results}
-        missing = [file_id for name, file_id in cvs.items() if name not in found]
+        missing = [name for name in names if name not in found]
         if len(found) >= aim or not missing:
             break
-        results = results + [result for result in search(ws, queries[0], sections, missing, trace=trace) if result["file_name"] in cvs]
-    names = best_cvs(results, k)
-    rank = {name: position for position, name in enumerate(names)}
+        results = results + [result for result in search(ws, queries[0], sections, missing, trace=trace) if result["file_name"] in allowed]
+    best = best_cvs(results, k)
+    rank = {name: position for position, name in enumerate(best)}
     matched = sorted((result for result in results if result["file_name"] in rank), key=lambda result: rank[result["file_name"]])
-    return Retrieved(load_cvs(ws, names, cvs, trace), matched)
+    return Retrieved(load_cvs(ws, best, trace), matched)
 
 
 def _hybrid(ws: Workspace, query: str, vector: list[float], sections: list[str], file_ids: list[str] | None, where: str | None) -> list[dict]:

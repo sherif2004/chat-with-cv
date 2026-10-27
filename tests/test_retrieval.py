@@ -39,8 +39,8 @@ def install(monkeypatch, index: FakeIndex) -> None:
     monkeypatch.setattr(retrieval.openai_service, "embed", lambda texts: [[0.0] for _ in texts])
 
 
-def ids(*names: str) -> dict[str, str]:
-    return {name: name for name in names}  # file id is the key the fake index uses
+def ids(*names: str) -> list[str]:
+    return list(names)  # the file id is the file name
 
 
 def test_best_cvs_orders_by_each_cvs_best_chunk_and_keeps_k():

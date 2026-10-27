@@ -109,7 +109,7 @@ class _Run:
         limits = [f"{len(cvs)} CV{'' if len(cvs) == 1 else 's'}"] if cvs else []
         limits += [f"title: {job_title}"] if job_title else []
         self.on_step(f"Searching: {query}" + (f" ({', '.join(limits)})" if limits else ""))
-        file_ids = [ingest.file_id_for(name) for name in cvs] or None
+        file_ids = cvs or None
         where = search_index.metadata_filter(job_title)
         per_cv = min(max(int(per_cv or (2 if cvs else 1)), 1), 5)
         results = retrieval.spread_over_cvs(retrieval.search(self.ws, query, [], file_ids, where, self.trace), per_cv)
@@ -121,7 +121,7 @@ class _Run:
         if self.scope and file_name not in self.scope:
             return f"Error: no CV named '{file_name}'. Use a file name from list_cvs."
         self.on_step(f"Reading {file_name}")
-        chunks = search_index.get_cv_chunks(self.ws, ingest.file_id_for(file_name))
+        chunks = search_index.get_cv_chunks(self.ws, file_name)
         if not chunks:
             return f"Error: no CV named '{file_name}'. Use a file name from list_cvs."
         return self._show(chunks)

@@ -1,4 +1,5 @@
 """Azure AI Search: the searchable index of CV chunks and their embeddings."""
+import base64
 import logging
 from functools import lru_cache
 
@@ -36,6 +37,32 @@ SCORING_PROFILE = "cv"
 BOOSTED_SECTIONS = ["experience", "skills"]  # chunks from these sections rank a little higher for keyword matches
 META_FIELDS = ["candidate_name", "job_title", "email", "phone", "location"]
 ANALYZER = "en.microsoft"  # English stemming and stop words for keyword search ("built" also finds "building")
+
+DELIMITERS = ("|", ";", "~", "^")  # for search.in: the first one that is in none of the file names
+
+
+def chunk_key(file_id: str, number: int) -> str:
+    """The document key of one chunk. A key may hold only letters, digits, _ - and =, and a file name may hold anything else,
+    so the name is base64-encoded (URL-safe); the chunk number after the last "-" keeps the chunks of a CV in reading order."""
+    return f"{base64.urlsafe_b64encode(file_id.encode()).decode()}-{number}"
+
+
+def odata_string(value: str) -> str:
+    """A text as an OData string literal: in quotes, with each quote inside doubled."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def file_id_filter(file_ids: list[str]) -> str | None:
+    """An OData filter that matches the chunks of these CVs (the file id is the file name, which may hold quotes and commas)."""
+    if not file_ids:
+        return None
+    if len(file_ids) == 1:
+        return f"file_id eq {odata_string(file_ids[0])}"
+    delimiter = next((d for d in DELIMITERS if not any(d in file_id for file_id in file_ids)), None)
+    if delimiter is None:
+        return "(" + " or ".join(f"file_id eq {odata_string(file_id)}" for file_id in file_ids) + ")"
+    return f"search.in(file_id, {odata_string(delimiter.join(file_ids))}, {odata_string(delimiter)})"
+
 
 _credential = AzureKeyCredential(settings.azure.search_key.get_secret_value())
 _index_client = SearchIndexClient(settings.azure.search_endpoint, _credential)
@@ -166,14 +193,14 @@ def upload_chunks(ws: Workspace, docs: list[dict]) -> None:
 
 def get_hash(ws: Workspace, file_id: str) -> str | None:
     """The content hash stored for a file, or None if it is not indexed or its chunks disagree (interrupted run)."""
-    results = _client(ws).search("*", filter=f"file_id eq '{file_id}'", select=["content_hash"])
+    results = _client(ws).search("*", filter=file_id_filter([file_id]), select=["content_hash"])
     hashes = {result["content_hash"] for result in results}
     return hashes.pop() if len(hashes) == 1 else None
 
 
 def delete_stale_chunks(ws: Workspace, file_id: str, keep_ids: set[str]) -> None:
     """After re-indexing a changed file: drop chunks the new version no longer has."""
-    results = _client(ws).search("*", filter=f"file_id eq '{file_id}'", select=["id"])
+    results = _client(ws).search("*", filter=file_id_filter([file_id]), select=["id"])
     stale = [{"id": result["id"]} for result in results if result["id"] not in keep_ids]
     for start in range(0, len(stale), 500):
         _client(ws).delete_documents(stale[start : start + 500])
@@ -218,7 +245,7 @@ def delete_chunks(ws: Workspace, ids: list[str]) -> None:
 def get_cv_chunks(ws: Workspace, file_id: str) -> list[dict]:
     """Every chunk of one CV in reading order."""
     results = _client(ws).search(
-        "*", filter=f"file_id eq '{file_id}'", select=["id", "file_name", "file_url", "section", "page", "content", *META_FIELDS], top=1000
+        "*", filter=file_id_filter([file_id]), select=["id", "file_name", "file_url", "section", "page", "content", *META_FIELDS], top=1000
     )
     chunks = sorted(results, key=lambda r: int(r["id"].rsplit("-", 1)[1]))  # the id ends with the chunk's position
     return [
@@ -246,7 +273,7 @@ def hybrid_search(
     if section_types:
         filters.append(f"search.in(section_type, '{','.join(section_types)}', ',')")
     if file_ids:
-        filters.append(f"search.in(file_id, '{','.join(file_ids)}', ',')")
+        filters.append(file_id_filter(file_ids))
     if where:
         filters.append(f"({where})")
     section_filter = " and ".join(filters) or None

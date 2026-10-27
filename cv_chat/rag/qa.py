@@ -335,5 +335,4 @@ def _read_cvs(
     queries = [route.query, *(_expand(route.query, trace) if expand else [])]
     reading = f"reading up to {min(k, len(names))} of {len(names)} CVs"
     on_step(f"Question about everyone: {reading}" if route.everyone else f"Searching the CVs with {len(queries)} quer{'y' if len(queries) == 1 else 'ies'}, {reading}")
-    cvs = {name: ingest.file_id_for(name) for name in names}
-    return retrieval.retrieve(ws, queries, route.sections, cvs, trace, k, scoped=bool(scope))
+    return retrieval.retrieve(ws, queries, route.sections, names, trace, k, scoped=bool(scope))
