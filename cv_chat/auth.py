@@ -5,7 +5,8 @@ so a leaked database does not give anyone a working login.
 
 Hashing takes about 50 ms, so it never happens while a database connection is held: the pool is small and every page run
 asks it for the session. Failed logins, password checks and recovery-code guesses are counted per email (or per user) and
-refused for a while once there are too many, so a password cannot be guessed without limit.
+refused for a while once there are too many, so a password cannot be guessed without limit. An attempt is counted before
+the password is checked, so a burst of guesses cannot slip through together.
 """
 import hashlib
 import hmac
@@ -44,29 +45,23 @@ def _digest(token: str) -> str:
 
 # ---- too many failures: a key is "login:<email>", "reset:<email>" or "password:<user id>"
 
-def _locked_minutes(key: str) -> int:
-    """How many minutes until this key may try again; 0 when it is not locked. It is locked while it has max_failed_attempts
-    failures newer than lockout_minutes, and is free again when the oldest of them is lockout_minutes old."""
+def _reserve_attempt(key: str) -> None:
+    """Count this attempt now, before the password is checked, and refuse it if the key has already used up its attempts.
+
+    Counting first (under a lock for the key) is what makes the limit hold when many guesses arrive at once: each one sees the
+    others. The attempt stays counted if it fails and is wiped by _clear_failures if it succeeds. A key is locked while it has
+    max_failed_attempts attempts newer than lockout_minutes, and is free again when the oldest of them is that old.
+    """
     with db.pool().connection() as conn:
-        rows = conn.execute(
-            "SELECT failed_at FROM auth_failures WHERE key = %s AND failed_at > now() - make_interval(mins => %s) "
-            "ORDER BY failed_at DESC LIMIT %s",
-            (key, cfg.lockout_minutes, cfg.max_failed_attempts),
-        ).fetchall()
-    if len(rows) < cfg.max_failed_attempts:
-        return 0
-    free_at = rows[-1][0] + timedelta(minutes=cfg.lockout_minutes)
-    return max(1, math.ceil((free_at - datetime.now(free_at.tzinfo)).total_seconds() / 60))
-
-
-def _refuse_if_locked(key: str) -> None:
-    if minutes := _locked_minutes(key):
-        raise AuthError(f"Too many failed attempts. Try again in about {minutes} minute{'' if minutes == 1 else 's'}.")
-
-
-def _record_failure(key: str) -> None:
-    with db.pool().connection() as conn:
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (key,))
         conn.execute("DELETE FROM auth_failures WHERE failed_at < now() - make_interval(mins => %s)", (cfg.lockout_minutes,))
+        recent = conn.execute(
+            "SELECT failed_at FROM auth_failures WHERE key = %s ORDER BY failed_at DESC LIMIT %s", (key, cfg.max_failed_attempts)
+        ).fetchall()
+        if len(recent) >= cfg.max_failed_attempts:
+            free_at = recent[-1][0] + timedelta(minutes=cfg.lockout_minutes)
+            minutes = max(1, math.ceil((free_at - datetime.now(free_at.tzinfo)).total_seconds() / 60))
+            raise AuthError(f"Too many failed attempts. Try again in about {minutes} minute{'' if minutes == 1 else 's'}.")
         conn.execute("INSERT INTO auth_failures (key) VALUES (%s)", (key,))
 
 
@@ -136,13 +131,12 @@ def reset_password(email: str, code: str, new_password: str) -> str:
     if len(new_password) < cfg.min_password:
         raise AuthError(f"The new password needs at least {cfg.min_password} characters.")
     key = f"reset:{email}"
-    _refuse_if_locked(key)
+    _reserve_attempt(key)
     with db.pool().connection() as conn:
         row = conn.execute("SELECT id, recovery_hash FROM users WHERE email = %s", (email,)).fetchone()
     stored = row[1] if row and row[1] else _digest("no-recovery-code")  # compared anyway, so timing does not show who exists
     matches = hmac.compare_digest(stored, _digest(_normalise_code(code)))
     if row is None or not row[1] or not matches:
-        _record_failure(key)
         raise AuthError("Wrong email or recovery code.")
     new_hash = _hasher.hash(new_password)
     with db.pool().connection() as conn:
@@ -154,6 +148,7 @@ def reset_password(email: str, code: str, new_password: str) -> str:
             raise AuthError("Wrong email or recovery code.")
         conn.execute("DELETE FROM sessions WHERE user_id = %s", (row[0],))
     _clear_failures(key)
+    _clear_failures(f"login:{email}")  # the recovery code proves who this is: a lock on the login must not keep them out
     return issue_recovery_code(str(row[0]))
 
 
@@ -161,11 +156,10 @@ def check_password(user_id: str, password: str) -> bool:
     """True if this is the user's password. For actions that must not rest on a session alone, such as deleting the account.
     Raises AuthError when there have been too many wrong attempts."""
     key = f"password:{user_id}"
-    _refuse_if_locked(key)
+    _reserve_attempt(key)
     with db.pool().connection() as conn:
         row = conn.execute("SELECT password_hash FROM users WHERE id = %s", (user_id,)).fetchone()
     if not _password_matches(row[0] if row else None, password):
-        _record_failure(key)
         return False
     _clear_failures(key)
     return True
@@ -176,11 +170,10 @@ def change_password(user_id: str, current: str, new: str, keep_token: str | None
     if len(new) < cfg.min_password:
         raise AuthError(f"The new password needs at least {cfg.min_password} characters.")
     key = f"password:{user_id}"
-    _refuse_if_locked(key)
+    _reserve_attempt(key)
     with db.pool().connection() as conn:
         row = conn.execute("SELECT password_hash FROM users WHERE id = %s", (user_id,)).fetchone()
     if not _password_matches(row[0] if row else None, current):
-        _record_failure(key)
         raise AuthError("The current password is wrong.")
     new_hash = _hasher.hash(new)
     with db.pool().connection() as conn:
@@ -205,11 +198,10 @@ def log_in(email: str, password: str) -> str:
     """Check the password and return a new session token to store in the browser."""
     email = email.strip().lower()
     key = f"login:{email}"
-    _refuse_if_locked(key)
+    _reserve_attempt(key)
     with db.pool().connection() as conn:
         row = conn.execute("SELECT id, password_hash FROM users WHERE email = %s", (email,)).fetchone()
     if not _password_matches(row[1] if row else None, password):
-        _record_failure(key)
         raise AuthError("Wrong email or password.")
     _clear_failures(key)
     token = secrets.token_urlsafe(32)

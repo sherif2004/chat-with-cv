@@ -104,6 +104,47 @@ def test_recovery_code_guesses_are_throttled(user):
         auth.reset_password("jane@example.com", "AAAA-AAAA-AAAA-AAAA", "a new long password")
 
 
+def test_a_burst_of_guesses_at_once_cannot_get_past_the_limit(user, monkeypatch):
+    import threading
+
+    checked = []
+    real = auth._hasher
+
+    class Counting:
+        def verify(self, *args):
+            checked.append(1)
+            return real.verify(*args)
+
+        def hash(self, *args):
+            return real.hash(*args)
+
+    monkeypatch.setattr(auth, "_hasher", Counting())
+    results = []
+
+    def guess():
+        try:
+            auth.log_in("jane@example.com", "wrong password!")
+        except auth.AuthError as error:
+            results.append(str(error))
+
+    threads = [threading.Thread(target=guess) for _ in range(20)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(checked) == auth.cfg.max_failed_attempts  # the other 15 were refused before any password was checked
+    assert sum("Too many failed attempts" in message for message in results) == 20 - auth.cfg.max_failed_attempts
+
+
+def test_a_successful_reset_also_clears_a_lock_on_the_login(user):
+    code = auth.issue_recovery_code(user.id)
+    fail_login(auth.cfg.max_failed_attempts)  # someone else locked this email's login
+    with pytest.raises(auth.AuthError, match="Too many failed attempts"):
+        auth.log_in("jane@example.com", PASSWORD)
+    auth.reset_password("jane@example.com", code, "a new long password")
+    assert auth.log_in("jane@example.com", "a new long password")
+
+
 # --- the other password flows still work -----------------------------------------------------------------------------------------
 
 def test_reset_with_the_recovery_code_sets_the_password_ends_sessions_and_burns_the_code(user):
