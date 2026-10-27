@@ -4,6 +4,7 @@ Azure values keep their .env names (AZURE_SEARCH_KEY, ...). Every tunable can be
 CVCHAT_<GROUP>__<NAME>, for example CVCHAT_RETRIEVAL__TOP_K=10. Anything missing or out of range raises one ValidationError
 that names all of it; settings_error.describe turns it into a message for the screen.
 """
+import os
 import re
 from pathlib import Path
 from typing import Literal
@@ -131,6 +132,25 @@ class EntitiesSettings(_Group):
         return self
 
 
+class ConcurrencySettings(_Group):
+    embed_start: int = Field(4, ge=1)  # embedding requests in flight at first; halves on "too many requests", grows back to embed_max
+    embed_max: int = Field(8, ge=1)
+    interactive_reserved: int = Field(2, ge=0)  # embedding slots that ingesting CVs may not use, so a question never waits behind an upload
+    chat_start: int = Field(6, ge=1)  # chat requests in flight at first (all users together); adapts like the embedding limit
+    chat_max: int = Field(24, ge=1)
+    per_user_chat: int = Field(3, ge=1)  # chat calls one user may have starting at once
+    user_wait_seconds: float = Field(60, gt=0)  # after this long behind their own calls, a user's call goes on anyway
+    rate_limit_retries: int = Field(8, ge=0)
+    connection_retries: int = Field(4, ge=0)
+    ingest_workers: int = Field(default_factory=lambda: max(2, min(8, os.cpu_count() or 2)), ge=1)  # CVs processed at once, all users together
+
+    @model_validator(mode="after")
+    def _start_within_max(self) -> "ConcurrencySettings":
+        if self.embed_start > self.embed_max or self.chat_start > self.chat_max:
+            raise ValueError("a start value cannot be above its max")
+        return self
+
+
 class IndexSettings(_Group):
     version: int = Field(3, ge=1)  # bump when the stored fields or keys change: every user's index is then rebuilt from the stored CVs
     analyzer: str = "en.microsoft"  # English stemming and stop words for keyword search ("built" also finds "building")
@@ -167,6 +187,7 @@ class Settings(BaseSettings):
     retrieval: RetrievalSettings = RetrievalSettings()
     extraction: ExtractionSettings = ExtractionSettings()
     entities: EntitiesSettings = EntitiesSettings()
+    concurrency: ConcurrencySettings = ConcurrencySettings()
     index: IndexSettings = IndexSettings()
     ingest: IngestSettings = IngestSettings()
     agent: AgentSettings = AgentSettings()

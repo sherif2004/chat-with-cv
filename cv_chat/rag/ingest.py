@@ -80,7 +80,7 @@ def process_cv(
     on_stage("embedding")
     # Embed each chunk together with its file name, so chunks from later pages still point to the candidate.
     who = f"\nCandidate: {meta['candidate_name']}, {meta['job_title']}" if meta["candidate_name"] else ""
-    vectors = openai_service.embed([f"CV: {file_name}{who}\n{chunk.text}" for chunk in chunks])
+    vectors = openai_service.embed([f"CV: {file_name}{who}\n{chunk.text}" for chunk in chunks], background=True)
 
     file_url = blob_storage.blob_url(ws, file_name)
     docs = [

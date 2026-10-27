@@ -4,11 +4,11 @@ The state of each file is queued, processing (with its current stage), indexed, 
 Every user has their own queue and job list (see queue_for), all running on one shared pool of workers.
 """
 import logging
-import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
+from cv_chat.config import settings
 from cv_chat.rag import ingest
 from cv_chat.services import blob_storage
 from cv_chat.workspace import Workspace
@@ -84,7 +84,7 @@ class IngestQueue:
         return any(job.state not in FINISHED for job in self.snapshot())
 
 
-_pool = ThreadPoolExecutor(max_workers=max(2, min(8, os.cpu_count() or 2)), thread_name_prefix="ingest")  # as many CVs at once as the machine has cores (2 to 8); shared by every user's queue
+_pool = ThreadPoolExecutor(max_workers=settings.concurrency.ingest_workers, thread_name_prefix="ingest")  # shared by every user's queue
 _queues: dict[str, IngestQueue] = {}
 _queues_lock = threading.Lock()
 

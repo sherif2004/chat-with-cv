@@ -252,6 +252,7 @@ def ask(
     identical chat. on_step is told each step as it starts (routing decision, searches, agent tool calls).
     scope is a list of CV file names to answer from; empty or None means all CVs.
     """
+    openai_service.current_user.set(ws.user_id)  # this thread's chat calls count against this user (see openai_service.UserLimits)
     cache = cache_for(ws)  # this user's own: an answer cached for one user is never served to another
     question = question.strip()
     scope = sorted(set(scope or []))
