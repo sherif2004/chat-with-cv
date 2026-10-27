@@ -7,7 +7,6 @@ from cv_chat.ui import states
 from cv_chat.workspace import Workspace
 
 SORTS = {"Name": lambda c: (c["name"] or c["file_name"]).lower(), "Job title": lambda c: (c["title"] or "~").lower(), "Location": lambda c: (c["location"] or "~").lower()}
-COLUMNS = 3
 MAX_COMPARE = 3  # candidates that can be compared side by side
 
 
