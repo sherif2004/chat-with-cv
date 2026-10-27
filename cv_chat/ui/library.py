@@ -11,6 +11,7 @@ from cv_chat.ui import candidates, states
 from cv_chat.ui.safe import esc
 from cv_chat.workspace import Workspace
 
+POLL_SECONDS = 2  # how often the page looks at the ingest queue while CVs are being processed
 CV_LIST_SECONDS = 300  # how long the list of CVs is kept before Azure is asked again (it is also dropped whenever it changes)
 
 
@@ -48,9 +49,18 @@ def render(ws: Workspace, cvs: list[str]) -> None:
     _table(ws, cvs)
 
 
-@st.fragment(run_every=2)
+def poll_every(ws: Workspace) -> int | None:
+    """Seconds between looks at the queue: only while CVs are being processed. An idle page has nothing to watch, and a new upload
+    reruns the page, which starts the polling again."""
+    return POLL_SECONDS if jobs.queue_for(ws).active() else None
+
+
 def progress(ws: Workspace) -> None:
-    """The live state of every file, refreshed every 2 seconds."""
+    """The live state of every file, refreshed every 2 seconds while CVs are being processed."""
+    st.fragment(run_every=poll_every(ws))(_progress)(ws)
+
+
+def _progress(ws: Workspace) -> None:
     queue = jobs.queue_for(ws)
     snapshot = queue.snapshot()
     if not snapshot:
@@ -82,10 +92,13 @@ def _show_job(job: jobs.Job) -> None:
         st.caption(esc((job.error.splitlines() or ["Failed"])[0][:200]))
 
 
-@st.fragment(run_every=2)
 def watch(ws: Workspace) -> None:
-    """Runs in the sidebar on every page, checking every 2 seconds. It shows a progress bar while CVs are processed, and when
-    the last one finishes it refreshes the CV list and tells the user, whichever page they are on."""
+    """Runs in the sidebar on every page. While CVs are processed it checks every 2 seconds, shows a progress bar, and when the
+    last one finishes it refreshes the CV list and tells the user, whichever page they are on. Idle, it does not poll."""
+    st.fragment(run_every=poll_every(ws))(_watch)(ws)
+
+
+def _watch(ws: Workspace) -> None:
     queue = jobs.queue_for(ws)
     snapshot = queue.snapshot()
     active = queue.active()

@@ -1,13 +1,14 @@
 """Login and sign-up screen, and the cookie that keeps a user logged in across page reloads.
 
 Streamlit can read cookies on the server (st.context.cookies) but cannot set them, so a tiny script in the page
-writes the cookie. It is therefore not HttpOnly; it holds a random token whose hash is the only thing stored server-side.
+writes the cookie. It is therefore not HttpOnly (Streamlit cannot set that), but it is marked Secure when the app is served over
+https; it holds a random token whose hash is the only thing stored server-side.
 """
 import json
 
 import streamlit as st
 
-from cv_chat import auth, db
+from cv_chat import account_config, auth, db
 from cv_chat.ui import style
 
 COOKIE = "cv_session"
@@ -34,8 +35,22 @@ def _provision(user: auth.User) -> None:
         raise
 
 
+def cookie_text(value: str, max_age: int, https: bool) -> str:
+    """The cookie as the browser stores it. Secure only over https: over plain http a browser would refuse to keep it."""
+    text = f"{COOKIE}={value}; path=/; max-age={max_age}; SameSite=Lax"
+    return text + "; Secure" if https else text
+
+
+def _served_over_https() -> bool:
+    """True if the user's browser reached the app over https (also behind a proxy: this is the address in the browser)."""
+    try:
+        return str(st.context.url or "").startswith("https://")
+    except Exception:  # outside a page run there is no address
+        return False
+
+
 def _write_cookie(value: str, max_age: int) -> None:
-    script = f"window.parent.document.cookie = {json.dumps(f'{COOKIE}={value}; path=/; max-age={max_age}; SameSite=Lax')};"
+    script = f"window.parent.document.cookie = {json.dumps(cookie_text(value, max_age, _served_over_https()))};"
     st.iframe(f"<script>{script}</script>", height=1)  # a fixed string built here: no user text goes into it
 
 
@@ -65,7 +80,7 @@ def current_user() -> auth.User:
     if token is None:
         st.stop()
     screen.empty()
-    _write_cookie(token, auth.SESSION_DAYS * 86400)  # no rerun: the script must stay on the page until the browser has run it
+    _write_cookie(token, account_config.accounts.session_days * 86400)  # no rerun: the script must stay on the page until the browser has run it
     st.session_state["user"], st.session_state["token"] = auth.user_for_token(token), token
     if new_code:
         st.session_state["recovery_code"] = new_code
@@ -111,7 +126,7 @@ def _login_screen() -> tuple[str | None, str | None]:
             with signup_tab, st.form("signup", border=False):
                 email = st.text_input("Email", key="signup_email", autocomplete="email")
                 password = st.text_input("Password", type="password", key="signup_password", autocomplete="new-password")
-                st.caption(f"At least {auth.MIN_PASSWORD} characters. A few words in a row make a strong, easy-to-remember password.")
+                st.caption(f"At least {account_config.accounts.min_password} characters. A few words in a row make a strong, easy-to-remember password.")
                 if st.form_submit_button("Create account", type="primary", width="stretch"):
                     try:
                         user = auth.sign_up(email, password, on_created=_provision)
@@ -122,7 +137,7 @@ def _login_screen() -> tuple[str | None, str | None]:
                 st.caption("Use the recovery code you were given when you created your account.")
                 email = st.text_input("Email", key="forgot_email", autocomplete="email")
                 code = st.text_input("Recovery code", key="forgot_code", placeholder="XXXX-XXXX-XXXX-XXXX")
-                password = st.text_input(f"New password (at least {auth.MIN_PASSWORD} characters)", type="password", key="forgot_password", autocomplete="new-password")
+                password = st.text_input(f"New password (at least {account_config.accounts.min_password} characters)", type="password", key="forgot_password", autocomplete="new-password")
                 if st.form_submit_button("Reset password", type="primary", width="stretch"):
                     try:
                         new_code = auth.reset_password(email, code, password)
@@ -145,11 +160,6 @@ def account_menu(user: auth.User) -> None:
             help="Adds a Details panel under each answer: how the question was routed, what was searched, the settings used and where the time went.",
         )
         st.toggle(
-            "Query expansion", key="expand_queries",
-            help="Also search two reworded versions of each question and merge the results. "
-            "Finds more, but answers start 1 to 2 seconds later and each question uses three semantic searches.",
-        )
-        st.toggle(
             "Cache final answers", key="cache_answers",
             help="Reuse the answer to an identical question in an identical chat. Off by default: a cached answer can be out of date.",
         )
@@ -161,7 +171,7 @@ def account_menu(user: auth.User) -> None:
         st.markdown("**Change password**")
         with st.form("change_password", clear_on_submit=True):
             current = st.text_input("Current password", type="password")
-            new = st.text_input(f"New password (at least {auth.MIN_PASSWORD} characters)", type="password")
+            new = st.text_input(f"New password (at least {account_config.accounts.min_password} characters)", type="password")
             if st.form_submit_button("Change password"):
                 try:
                     auth.change_password(user.id, current, new, keep_token=st.session_state.get("token"))
@@ -180,14 +190,24 @@ def account_menu(user: auth.User) -> None:
         password = st.text_input("Your password", type="password", key="delete_password")
         if st.button("Delete my account", icon=":material/delete_forever:", type="primary", width="stretch",
                      disabled=confirm.strip().lower() != user.email or not password):
-            if auth.check_password(user.id, password):
-                _delete_account(user)
+            try:
+                correct = auth.check_password(user.id, password)
+            except auth.AuthError as error:  # too many wrong attempts
+                st.error(str(error))
             else:
-                st.error("Wrong password.")
+                if correct:
+                    _delete_account(user)
+                else:
+                    st.error("Wrong password.")
 
 
 def _new_recovery_code(user: auth.User) -> None:
-    if not auth.check_password(user.id, st.session_state.get("recovery_password", "")):
+    try:
+        correct = auth.check_password(user.id, st.session_state.get("recovery_password", ""))
+    except auth.AuthError as error:  # too many wrong attempts
+        st.toast(str(error), icon=":material/error:")
+        return
+    if not correct:
         st.toast("Wrong password.", icon=":material/error:")
         return
     st.session_state["recovery_code"] = auth.issue_recovery_code(user.id)  # shown by _recovery_gate on the next run

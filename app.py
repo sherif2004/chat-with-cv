@@ -1,8 +1,10 @@
 """Chat with CVs: Streamlit entry point. Run with `streamlit run app.py`."""
 import streamlit as st
+from pydantic import ValidationError
 
 st.set_page_config(page_title="CV Lens · Chat with your CVs", page_icon="cv_chat/ui/assets/icon.png", layout="wide")
 
+from cv_chat.settings_error import describe
 from cv_chat.ui import accounts, profile, states, style  # none of these needs the Azure settings, so the error screens below always work
 
 profile.start()  # timing of this page run, only when the app was started with CV_PROFILE=1
@@ -15,10 +17,10 @@ with profile.phase("account menu"):
 try:
     with profile.phase("imports"):
         from cv_chat.workspace import Workspace
-        from cv_chat.rag import ingest
+        from cv_chat.rag import ingest, jobs
         from cv_chat.ui import candidates, chat, library, sidebar
-except KeyError as missing:  # config.py raises KeyError for a value missing from .env
-    states.error(f"Missing {missing} in .env. Copy .env.example to .env, fill in your Azure values and restart the app.", "Check again")
+except ValidationError as problems:  # config.py raises it for a value missing from .env or out of range
+    states.error(f"Missing or invalid in .env: {describe(problems)}. Copy .env.example to .env, fill in your Azure values and restart the app.", "Check again")
     st.stop()
 except Exception as error:  # for example a malformed storage connection string
     states.error(f"Could not connect to Azure: {error}. Check the values in .env.", "Try again")
@@ -28,7 +30,9 @@ except Exception as error:  # for example a malformed storage connection string
 
 @st.cache_resource(show_spinner="Checking your storage and search index...")
 def _prepare_workspace(ws: Workspace) -> None:
-    ingest.prepare(ws)  # creates this user's container and index; an index made by an older version gets the new fields
+    rebuilt = ingest.prepare(ws)  # creates this user's container and index; an index made by an older version is created again
+    if rebuilt:  # the new index is empty: index the stored CVs again in the background (the sidebar shows the progress)
+        jobs.queue_for(ws).submit([(name, None) for name in rebuilt])
 
 
 ws = Workspace(user.id)  # built only from the logged-in user's id, so every call below reaches only their own data
@@ -53,6 +57,6 @@ with profile.phase(f"view: {view}"):
     elif view == "Library":
         library.render(ws, cvs)
     else:
-        style.inject(reading_column=True)
+        style.reading_column()
         chat.render(ws, cvs, has_cvs=bool(cvs))
 profile.finish()

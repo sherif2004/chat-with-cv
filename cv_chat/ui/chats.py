@@ -47,7 +47,7 @@ def render(ws: Workspace) -> None:
 def _row(ws: Workspace, chat: history.Conversation, active: bool) -> None:
     title_column, menu_column = st.columns([6, 1], vertical_alignment="center", gap="xxsmall")
     title_column.button(
-        chat.title, key=f"open_{chat.id}", width="stretch", on_click=open_chat, args=(ws, chat.id),
+        esc(chat.title), key=f"open_{chat.id}", width="stretch", on_click=open_chat, args=(ws, chat.id),
         type="secondary" if active else "tertiary", icon=":material/chat_bubble:" if active else None,
     )
     with menu_column.popover("", icon=":material/more_vert:", type="tertiary", width="content", key=f"chatmenu_{chat.id}"):

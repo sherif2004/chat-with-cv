@@ -1,4 +1,7 @@
 """Azure AI Search: the searchable index of CV chunks and their embeddings."""
+import base64
+import hashlib
+import json
 import logging
 from functools import lru_cache
 
@@ -27,23 +30,47 @@ from azure.search.documents.indexes.models import (
 )
 from azure.search.documents.models import VectorizedQuery
 
-from cv_chat import config
+from cv_chat.config import settings
+from cv_chat.processing.sections import SECTION_TYPES
 from cv_chat.workspace import Workspace
 
 log = logging.getLogger(__name__)
-SEMANTIC_CONFIG = "default"
-SCORING_PROFILE = "cv"
-BOOSTED_SECTIONS = ["experience", "skills"]  # chunks from these sections rank a little higher for keyword matches
 META_FIELDS = ["candidate_name", "job_title", "email", "phone", "location"]
-ANALYZER = "en.microsoft"  # English stemming and stop words for keyword search ("built" also finds "building")
 
-_credential = AzureKeyCredential(config.SEARCH_KEY)
-_index_client = SearchIndexClient(config.SEARCH_ENDPOINT, _credential)
+_semantic_available = True  # False once the service has said it has no semantic ranker
+DELIMITERS = ("|", ";", "~", "^")  # for search.in: the first one that is in none of the file names
+
+
+def chunk_key(file_id: str, number: int) -> str:
+    """The document key of one chunk. A key may hold only letters, digits, _ - and =, and a file name may hold anything else,
+    so the name is base64-encoded (URL-safe); the chunk number after the last "-" keeps the chunks of a CV in reading order."""
+    return f"{base64.urlsafe_b64encode(file_id.encode()).decode()}-{number}"
+
+
+def odata_string(value: str) -> str:
+    """A text as an OData string literal: in quotes, with each quote inside doubled."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def file_id_filter(file_ids: list[str]) -> str | None:
+    """An OData filter that matches the chunks of these CVs (the file id is the file name, which may hold quotes and commas)."""
+    if not file_ids:
+        return None
+    if len(file_ids) == 1:
+        return f"file_id eq {odata_string(file_ids[0])}"
+    delimiter = next((d for d in DELIMITERS if not any(d in file_id for file_id in file_ids)), None)
+    if delimiter is None:
+        return "(" + " or ".join(f"file_id eq {odata_string(file_id)}" for file_id in file_ids) + ")"
+    return f"search.in(file_id, {odata_string(delimiter.join(file_ids))}, {odata_string(delimiter)})"
+
+
+_credential = AzureKeyCredential(settings.azure.search_key.get_secret_value())
+_index_client = SearchIndexClient(settings.azure.search_endpoint, _credential)
 
 
 @lru_cache(maxsize=64)
 def _search_client_for(index: str) -> SearchClient:
-    return SearchClient(config.SEARCH_ENDPOINT, index, _credential)
+    return SearchClient(settings.azure.search_endpoint, index, _credential)
 
 
 def _client(ws: Workspace) -> SearchClient:
@@ -64,62 +91,26 @@ def delete_index(ws: Workspace) -> None:
         pass
 
 
-def _outdated_settings(index: SearchIndex) -> list[str]:
-    """Settings the index was created with that Azure cannot change in place. Empty when the index is current."""
-    fields = {field.name: field for field in index.fields}
-    problems = []
-    if getattr(fields.get("content"), "analyzer_name", None) != ANALYZER:
-        problems.append(f"the text analyzer of 'content' is not {ANALYZER}")
-    if not getattr(fields.get("file_name"), "filterable", False):
-        problems.append("'file_name' is not filterable")
-    if "candidate_name" not in fields:
-        problems.append("the CV metadata fields (candidate name, job title, contact) are missing")
-    if not any(profile.name == SCORING_PROFILE for profile in index.scoring_profiles or []):
-        problems.append("the scoring profile that boosts names, titles and sections is missing")
-    algorithms = index.vector_search.algorithms if index.vector_search else []
-    if not any(getattr(a.parameters, "metric", None) == "cosine" for a in algorithms):
-        problems.append("the vector similarity metric is not cosine")
-    return problems
+MARKER_PREFIX = "cvschema_"  # the name of the marker field starts with this, followed by a hash of the whole index definition
 
 
-def _is_complete(index: SearchIndex, wanted_fields: set[str]) -> bool:
-    """True if the index already has every field and the semantic configuration, so updating it would change nothing."""
-    have = {field.name for field in index.fields}
-    configurations = index.semantic_search.configurations if index.semantic_search else []
-    return wanted_fields <= have and any(c.name == SEMANTIC_CONFIG for c in configurations or [])
-
-
-def ensure_index(ws: Workspace, dimensions: int) -> None:
-    """Create the index (vectors of the given length), or update it in place if it already exists."""
-    existing = _existing_index(ws)
-    if existing is not None:
-        existing_dimensions = next((f.vector_search_dimensions for f in existing.fields if f.name == "content_vector"), None)
-        if existing_dimensions is not None and existing_dimensions != dimensions:
-            raise RuntimeError(
-                f"The index '{ws.index}' stores vectors of length {existing_dimensions}, but the embedding model returns "
-                f"{dimensions}. Delete the index in the Azure portal, then process the CVs again."
-            )
-        if problems := _outdated_settings(existing):
-            raise RuntimeError(
-                f"The index '{ws.index}' was made by an older version: {'; '.join(problems)}. Azure cannot change "
-                "this in place. Delete the index in the Azure portal, restart the app, "
-                "then click Update outdated CVs to index the stored CVs again."
-            )
-    fields = [
+def _fields(dimensions: int) -> list[SearchField]:
+    return [
         SimpleField(name="id", type=SearchFieldDataType.String, key=True),
-        SimpleField(name="file_id", type=SearchFieldDataType.String, filterable=True),
+        SimpleField(name="file_id", type=SearchFieldDataType.String, filterable=True),  # the file name
         SimpleField(name="file_url", type=SearchFieldDataType.String),  # plain Blob address of the original file
         SearchableField(name="file_name", filterable=True),  # keyword search also matches names in file names
         SearchableField(name="section", filterable=True, facetable=True),  # headings are searchable and weighted too
         SimpleField(name="section_type", type=SearchFieldDataType.String, filterable=True),
         SimpleField(name="page", type=SearchFieldDataType.Int32, filterable=True),
+        SimpleField(name="chunk_no", type=SearchFieldDataType.Int32, filterable=True, sortable=True),  # the chunk's position in its CV
         SimpleField(name="content_hash", type=SearchFieldDataType.String),
         SearchableField(name="candidate_name", filterable=True),
         SearchableField(name="job_title", filterable=True),
         SimpleField(name="email", type=SearchFieldDataType.String),
         SimpleField(name="phone", type=SearchFieldDataType.String),
         SimpleField(name="location", type=SearchFieldDataType.String),
-        SearchableField(name="content", analyzer_name=ANALYZER),
+        SearchableField(name="content", analyzer_name=settings.index.analyzer),
         SearchField(
             name="content_vector",
             type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
@@ -128,33 +119,56 @@ def ensure_index(ws: Workspace, dimensions: int) -> None:
             vector_search_profile_name="default",
         ),
     ]
-    if existing is not None and _is_complete(existing, {field.name for field in fields}):
-        return  # already has every field and the semantic settings: skip the update call (one Azure round trip per start)
-    vector_search = VectorSearch(
-        algorithms=[HnswAlgorithmConfiguration(name="hnsw", parameters=HnswParameters(metric="cosine"))],
-        profiles=[VectorSearchProfile(name="default", algorithm_configuration_name="hnsw")],
-    )
-    semantic_search = SemanticSearch(configurations=[SemanticConfiguration(
-        name=SEMANTIC_CONFIG,
-        prioritized_fields=SemanticPrioritizedFields(
-            title_field=SemanticField(field_name="file_name"),
-            content_fields=[SemanticField(field_name="content")],
-            keywords_fields=[SemanticField(field_name="section")],  # the heading tells the ranker what the text is about
+
+
+def desired_index(ws: Workspace, dimensions: int) -> SearchIndex:
+    """The index this version of the app wants for the user. It carries a marker field named after a hash of the whole
+    definition (fields, analyzer, vector size and metric, scoring, semantic ranking, and settings.index.version), so an index
+    made by any other version is recognised by its missing marker."""
+    parts = dict(
+        fields=_fields(dimensions),
+        vector_search=VectorSearch(
+            algorithms=[HnswAlgorithmConfiguration(name="hnsw", parameters=HnswParameters(metric=settings.index.vector_metric))],
+            profiles=[VectorSearchProfile(name="default", algorithm_configuration_name="hnsw")],
         ),
-    )])
-    scoring_profiles = [ScoringProfile(
-        name=SCORING_PROFILE,
-        # Keyword matches in a name or title count more than the same words in the body text.
-        text_weights=TextWeights(weights={"candidate_name": 3.0, "job_title": 2.0, "file_name": 2.0, "section": 1.5, "content": 1.0}),
-        functions=[TagScoringFunction(
-            field_name="section_type", boost=1.5, parameters=TagScoringParameters(tags_parameter="boostSections"),
+        semantic_search=SemanticSearch(configurations=[SemanticConfiguration(
+            name=settings.index.semantic_config,
+            prioritized_fields=SemanticPrioritizedFields(
+                title_field=SemanticField(field_name="file_name"),
+                content_fields=[SemanticField(field_name="content")],
+                keywords_fields=[SemanticField(field_name="section")],  # the heading tells the ranker what the text is about
+            ),
+        )]),
+        scoring_profiles=[ScoringProfile(
+            name=settings.index.scoring_profile,
+            # Keyword matches in a name or title count more than the same words in the body text.
+            text_weights=TextWeights(weights=settings.index.text_weights),
+            functions=[TagScoringFunction(
+                field_name="section_type", boost=settings.index.section_boost, parameters=TagScoringParameters(tags_parameter="boostSections"),
+            )],
+            function_aggregation="sum",
         )],
-        function_aggregation="sum",
-    )]
-    _index_client.create_or_update_index(SearchIndex(
-        name=ws.index, fields=fields, vector_search=vector_search, semantic_search=semantic_search,
-        scoring_profiles=scoring_profiles,
-    ))
+    )
+    definition = json.dumps(SearchIndex(name="definition", **parts).as_dict(), sort_keys=True, default=str)
+    signature = hashlib.md5(f"{definition}/{settings.index.version}".encode()).hexdigest()[:12]
+    marker = SimpleField(name=f"{MARKER_PREFIX}{signature}", type=SearchFieldDataType.String)
+    return SearchIndex(name=ws.index, **{**parts, "fields": [*parts["fields"], marker]})
+
+
+def ensure_index(ws: Workspace, dimensions: int) -> bool:
+    """Make the user's index the one this version wants (vectors of the given length). Azure cannot change an analyzer, a key
+    or a vector size in place, so an index made by any other version is deleted and created again; the CVs stay in Blob Storage.
+    Returns True when the index was just created, and so is empty: the stored CVs have to be indexed again."""
+    wanted = desired_index(ws, dimensions)
+    marker = next(field.name for field in wanted.fields if field.name.startswith(MARKER_PREFIX))
+    existing = _existing_index(ws)
+    if existing is not None and any(field.name == marker for field in existing.fields):
+        return False
+    if existing is not None:
+        log.info("the search index %s is out of date, creating it again", ws.index)
+        delete_index(ws)
+    _index_client.create_or_update_index(wanted)
+    return True
 
 
 def upload_chunks(ws: Workspace, docs: list[dict]) -> None:
@@ -166,17 +180,19 @@ def upload_chunks(ws: Workspace, docs: list[dict]) -> None:
 
 def get_hash(ws: Workspace, file_id: str) -> str | None:
     """The content hash stored for a file, or None if it is not indexed or its chunks disagree (interrupted run)."""
-    results = _client(ws).search("*", filter=f"file_id eq '{file_id}'", select=["content_hash"])
+    results = _client(ws).search("*", filter=file_id_filter([file_id]), select=["content_hash"])
     hashes = {result["content_hash"] for result in results}
     return hashes.pop() if len(hashes) == 1 else None
 
 
 def delete_stale_chunks(ws: Workspace, file_id: str, keep_ids: set[str]) -> None:
-    """After re-indexing a changed file: drop chunks the new version no longer has."""
-    results = _client(ws).search("*", filter=f"file_id eq '{file_id}'", select=["id"])
+    """After re-indexing a changed file: drop chunks the new version no longer has. Found by file name, which every chunk
+    has had since the first version, so chunks written under an older id scheme are cleaned up too."""
+    results = _client(ws).search("*", filter=f"file_name eq {odata_string(file_id)}", select=["id"])
     stale = [{"id": result["id"]} for result in results if result["id"] not in keep_ids]
-    for start in range(0, len(stale), 500):
-        _client(ws).delete_documents(stale[start : start + 500])
+    batch = settings.index.delete_batch
+    for start in range(0, len(stale), batch):
+        _client(ws).delete_documents(stale[start : start + batch])
 
 
 def delete_file_chunks(ws: Workspace, file_id: str) -> None:
@@ -184,45 +200,20 @@ def delete_file_chunks(ws: Workspace, file_id: str) -> None:
 
 
 def list_profiles(ws: Workspace) -> dict[str, dict]:
-    """The metadata of every indexed CV, by file name (read from one chunk of each CV)."""
-    results = _client(ws).search("*", select=["file_name", *META_FIELDS], top=1000)
-    profiles: dict[str, dict] = {}
-    for result in results:
-        profiles.setdefault(result["file_name"], {name: result.get(name) for name in META_FIELDS})
-    return profiles
-
-
-def cvs_mentioning(ws: Workspace, words: str) -> set[str]:
-    """File names of the CVs whose text contains every one of the words."""
-    results = _client(ws).search(words, search_fields=["content"], search_mode="all", select=["file_name"], top=1000)
-    return {result["file_name"] for result in results}
-
-
-def metadata_filter(job_title: str | None = None) -> str | None:
-    """An OData filter on the CV metadata: every word of the job title must appear in the title read from the CV."""
-    if job_title and (words := " ".join(job_title.replace("'", " ").split())):
-        return f"search.ismatch('{words}', 'job_title', 'simple', 'all')"
-    return None
-
-
-def list_chunks(ws: Workspace) -> list[tuple[str, str]]:
-    """(chunk id, file name) for every chunk in the index."""
-    return [(result["id"], result["file_name"]) for result in _client(ws).search("*", select=["id", "file_name"])]
-
-
-def delete_chunks(ws: Workspace, ids: list[str]) -> None:
-    if ids:
-        _client(ws).delete_documents([{"id": chunk_id} for chunk_id in ids])
+    """The metadata of every indexed CV, by file name: one row per CV (its first chunk)."""
+    results = _client(ws).search("*", filter="chunk_no eq 0", select=["file_name", *META_FIELDS], top=1000)
+    return {result["file_name"]: {name: result.get(name) for name in META_FIELDS} for result in results}
 
 
 def get_cv_chunks(ws: Workspace, file_id: str) -> list[dict]:
     """Every chunk of one CV in reading order."""
     results = _client(ws).search(
-        "*", filter=f"file_id eq '{file_id}'", select=["id", "file_name", "file_url", "section", "page", "content", *META_FIELDS], top=1000
+        "*", filter=file_id_filter([file_id]), select=["chunk_no", "file_name", "file_url", "section", "section_type", "page", "content", *META_FIELDS], top=1000
     )
-    chunks = sorted(results, key=lambda r: int(r["id"].rsplit("-", 1)[1]))  # the id ends with the chunk's position
+    chunks = sorted(results, key=lambda r: r["chunk_no"])
     return [
-        {"file_name": c["file_name"], "file_url": c.get("file_url") or "", "section": c.get("section") or "", "page": c.get("page"), "content": c["content"], "caption": "",
+        {"file_name": c["file_name"], "file_url": c.get("file_url") or "", "section": c.get("section") or "", "section_type": c.get("section_type") or "other",
+         "chunk_no": c["chunk_no"], "page": c.get("page"), "content": c["content"], "caption": "",
          **{name: c.get(name) for name in META_FIELDS}}
         for c in chunks
     ]
@@ -233,44 +224,45 @@ def hybrid_search(
     text: str,
     vector: list[float],
     k: int,
-    section_types: list[str] | None = None,
+    boost_sections: list[str] | None = None,
     file_ids: list[str] | None = None,
-    where: str | None = None,
+    section_types: list[str] | None = None,
 ) -> list[dict]:
-    """Keyword and vector search in one query, merged, then re-ranked by the semantic ranker.
+    """One Azure request that does keyword search, vector search and semantic re-ranking together.
 
-    section_types limits the search to those standard sections (see processing/sections.py);
-    file_ids limits it to those CVs; where is an extra OData filter (see metadata_filter).
+    boost_sections are the standard sections (see processing/sections.py) whose chunks rank higher through the scoring profile;
+    nothing is filtered out, so a CV with unusual headings is still found. Without them the default boosted sections are used.
+    file_ids limits the search to those CVs; section_types, if given, restricts it to chunks of those standard section types
+    (a hard filter, unlike boost_sections; unknown types are ignored).
     """
-    filters = []
-    if section_types:
-        filters.append(f"search.in(section_type, '{','.join(section_types)}', ',')")
-    if file_ids:
-        filters.append(f"search.in(file_id, '{','.join(file_ids)}', ',')")
-    if where:
-        filters.append(f"({where})")
-    section_filter = " and ".join(filters) or None
+    global _semantic_available
+    types = [name for name in section_types or [] if name in SECTION_TYPES]
+    filters = [file_id_filter(file_ids or []), f"search.in(section_type, '{','.join(types)}', ',')" if types else None]
     kwargs = dict(
         search_text=text,
         vector_queries=[VectorizedQuery(vector=vector, k_nearest_neighbors=k, fields="content_vector")],
-        filter=section_filter,
-        select=["file_name", "file_url", "section", "page", "content", *META_FIELDS],
-        scoring_profile=SCORING_PROFILE,
-        scoring_parameters=[f"boostSections-{','.join(BOOSTED_SECTIONS)}"],
+        filter=" and ".join(f for f in filters if f) or None,
+        select=["file_name", "file_url", "section", "page", "chunk_no", "content", *META_FIELDS],
+        scoring_profile=settings.index.scoring_profile,
+        scoring_parameters=[f"boostSections-{','.join(boost_sections or settings.sections.boosted)}"],
         top=k,
     )
-    try:
-        results = list(_client(ws).search(
-            query_type="semantic",
-            semantic_configuration_name=SEMANTIC_CONFIG,
-            query_caption="extractive|highlight-false",  # the passage the ranker found most relevant, for Sources
-            **kwargs,
-        ))
-    except HttpResponseError as error:
-        if "semantic" not in str(error).lower():
-            raise
-        # The service has no semantic ranker (Free tier, or switched off): keep answering with plain hybrid search.
-        log.warning("semantic ranker unavailable, using hybrid search only: %s", str(error).splitlines()[0])
+    results = None
+    if _semantic_available:
+        try:
+            results = list(_client(ws).search(
+                query_type="semantic",
+                semantic_configuration_name=settings.index.semantic_config,
+                query_caption="extractive|highlight-false",  # the passage the ranker found most relevant, for Sources
+                **kwargs,
+            ))
+        except HttpResponseError as error:
+            if "semantic" not in str(error).lower():
+                raise
+            # The service has no semantic ranker (Free tier, or switched off): plain hybrid search from now on, without asking again.
+            log.warning("semantic ranker unavailable, using hybrid search only: %s", str(error).splitlines()[0])
+            _semantic_available = False
+    if results is None:
         results = list(_client(ws).search(**kwargs))
     found = []
     for result in results:
@@ -279,7 +271,7 @@ def hybrid_search(
         found.append({
             "score": reranker if reranker is not None else result.get("@search.score"),  # how relevant Azure found the chunk
             "file_name": result["file_name"], "file_url": result.get("file_url") or "", "section": result.get("section") or "", "page": result.get("page"),
-            "content": result["content"], "caption": captions[0].text if captions and captions[0].text else "",
+            "chunk_no": result.get("chunk_no"), "content": result["content"], "caption": captions[0].text if captions and captions[0].text else "",
             **{name: result.get(name) for name in META_FIELDS},
         })
     return found

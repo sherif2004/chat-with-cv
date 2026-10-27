@@ -1,5 +1,7 @@
-"""Section-aware chunking: split a CV on its headings, then window only the sections that are too long."""
+"""Section-aware chunking: one chunk per section of the CV, windowed only when a section is too long."""
 from dataclasses import dataclass
+
+from cv_chat.config import settings
 
 
 @dataclass(frozen=True)
@@ -13,12 +15,12 @@ def _clean(line: str) -> str:
     return " ".join(line.split())
 
 
-def _is_heading(line: str, layout_headers: set[str]) -> bool:
-    """A line the layout model labelled as a heading, or a short ALL-CAPS line."""
+def _is_heading(line: str, layout_headers: set[str], caps_headings: bool) -> bool:
+    """A line the layout model labelled as a heading, or (if caps_headings) a short ALL-CAPS line."""
     line = _clean(line)
-    if not line or len(line) > 40:
+    if not line or len(line) > settings.chunking.heading_max_chars:
         return False
-    return line in layout_headers or (len(line.split()) <= 5 and line.isupper())
+    return line in layout_headers or (caps_headings and len(line.split()) <= settings.chunking.caps_max_words and line.isupper())
 
 
 def _windows(text: str, max_chars: int, overlap: int) -> list[str]:
@@ -38,7 +40,11 @@ def _windows(text: str, max_chars: int, overlap: int) -> list[str]:
     return [w for w in out if w]
 
 
-def chunk_cv(pages: list[tuple[int, str]], layout_headers: list[str], max_chars: int, overlap: int) -> list[Chunk]:
+def chunk_cv(
+    pages: list[tuple[int, str]], layout_headers: list[str], max_chars: int = settings.chunking.max_chars,
+    overlap: int = settings.chunking.overlap, caps_headings: bool = settings.chunking.caps_headings,
+) -> list[Chunk]:
+    """One chunk per section: the heading and everything under it. Only a section longer than max_chars is split."""
     headers = {_clean(h) for h in layout_headers}
     blocks: list[tuple[str, int, str]] = []  # (heading, page, body)
     heading, buf, buf_page = "Other", [], 1
@@ -50,7 +56,7 @@ def chunk_cv(pages: list[tuple[int, str]], layout_headers: list[str], max_chars:
 
     for page_no, text in pages:
         for line in text.splitlines():
-            if _is_heading(line, headers):
+            if _is_heading(line, headers, caps_headings):
                 emit()
                 heading, buf, buf_page = _clean(line), [], page_no
                 continue

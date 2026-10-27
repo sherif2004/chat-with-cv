@@ -6,9 +6,9 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from cv_chat import config
+from cv_chat.config import settings
 from cv_chat.processing.sections import SECTION_TYPES
-from cv_chat.rag import agent, ingest, retrieval, roles
+from cv_chat.rag import agent, filters, ingest, retrieval
 from cv_chat.rag.cache import ANSWER, CHAT, ROUTE, Cache, cache_for
 from cv_chat.rag.trace import Trace
 from cv_chat.services import openai_service
@@ -35,7 +35,7 @@ CHAT_PROMPT = """You are the assistant of a "chat with CVs" app. The user's mess
 Do not state any fact about a candidate. If they ask what you can do, say you answer questions about the uploaded CVs."""
 
 ROUTER_PROMPT = f"""You prepare a message for a chat over a set of candidate CVs.
-Given the chat so far and the latest message, reply with JSON: {{"route": "...", "query": "...", "sections": [...], "role": "...", "everyone": false, "ask": "..."}}.
+Given the chat so far and the latest message, reply with JSON: {{"route": "...", "query": "...", "sections": [...], "section_only": false, "role": "...", "location": "...", "everyone": false, "ask": "..."}}.
 - "route": one of
   "chat"    - a greeting, thanks, or anything that needs no CV search;
   "simple"  - a question that one search over the CVs can answer;
@@ -48,18 +48,18 @@ Given the chat so far and the latest message, reply with JSON: {{"route": "...",
   (write names in Latin letters when you can). If it already stands alone in English, repeat it unchanged.
 - "sections": the CV sections that hold the answer, chosen only from {SECTION_TYPES}.
   Use [] when the question is about the whole CV or you are unsure.
+- "section_only": true only when the user asks specifically about one or more CV sections (for example "compare their
+  experience", "list everyone's education"), so that only those sections are searched; false when "sections" is just a hint
+  about where the answer may be (for example "who knows Python?").
 - "role": the job title the user wants candidates for, only when the message asks to find or filter candidates by one specific
   job role (for example "find a data engineer"), written in English. "" for a skill, a person's name, or no role.
+- "location": the place the user wants candidates from, only when the message asks to find or filter candidates by a place
+  (for example "engineers in Cairo"), written in English. "" for no place.
 - "everyone": true when the message wants every candidate (or all of the selected ones) compared, ranked or listed on the same
   point (for example "compare their Python skills", "who has the most experience?", "list everyone's education"); false for a
   question about one person or one specific skill or fact.
 - "ask": for "clarify" only, one short question that gets the missing detail, in the language of the message. "" otherwise."""
 
-EXPAND_PROMPT = f"""You help search a set of candidate CVs. Given a search query, reply with JSON: {{"queries": ["...", "..."]}}
-with exactly {config.EXPANDED_QUERIES} alternative queries that look for the same thing:
-1. keywords only: the key skills, job titles, technologies and names, no filler words;
-2. worded the way a CV would say it (for "built APIs" write "designed and developed REST services").
-Keep every name and number from the query. Do not add requirements the query does not have."""
 
 ROUTES = ("chat", "simple", "complex", "clarify")
 
@@ -79,6 +79,8 @@ class Route:
     role: str = ""  # a specific job role the user asked for, if any
     everyone: bool = False  # the question compares, ranks or lists all the candidates: answer from a fixed number of them (top-k)
     ask: str = ""  # the question to put to the user, for the "clarify" kind
+    location: str = ""  # a place the user asked for, if any
+    section_only: bool = False  # the user asked about specific sections: search only `sections` (otherwise they only boost the ranking)
 
 
 def _route(cache: Cache, question: str, history: list[dict], trace: Trace | None = None) -> Route:
@@ -113,7 +115,9 @@ def _route(cache: Cache, question: str, history: list[dict], trace: Trace | None
         if kind == "clarify" and not ask:
             kind = "simple"  # nothing to ask: answer with the best reading
         everyone = data.get("everyone") is True and kind in ("simple", "complex")
-        route = Route(kind, query, sections, role, everyone, ask if kind == "clarify" else "")
+        location = " ".join(str(data.get("location") or "").split())[:80]
+        section_only = data.get("section_only") is True and bool(sections)
+        route = Route(kind, query, sections, role, everyone, ask if kind == "clarify" else "", location, section_only)
     except Exception:  # routing only improves the search, so a failure must never block the answer
         return done(Route("simple", question, []), cached=False, failed=True)  # not cached: the next try may work
     cache.put(ROUTE, key, route, token)
@@ -129,30 +133,12 @@ def _recent(history: list[dict]) -> list[dict]:
     """Recent turns let follow-up questions refer back to earlier answers."""
     chosen, used = [], 0
     for message in reversed(history):  # newest first, as many as fit the budget; the latest message always goes in
-        text = message["content"] if chosen else message["content"][-config.HISTORY_CHARS :]
-        if chosen and used + len(text) > config.HISTORY_CHARS:
+        text = message["content"] if chosen else message["content"][-settings.retrieval.history_chars :]
+        if chosen and used + len(text) > settings.retrieval.history_chars:
             break
         chosen.append({"role": message["role"], "content": text})
         used += len(text)
     return chosen[::-1]
-
-
-def _expand(query: str, trace: Trace | None = None) -> list[str]:
-    """Two alternative search queries (keyword style, and worded the way a CV would say it). [] if the call fails."""
-    start = time.perf_counter()
-    try:
-        data = json.loads(openai_service.chat(
-            [{"role": "system", "content": EXPAND_PROMPT}, {"role": "user", "content": query}], json_mode=True
-        ))
-        alternatives = [str(q).strip() for q in data.get("queries", []) if str(q).strip()]
-    except Exception:  # expansion only widens the search, so a failure must never block the answer
-        if trace:
-            trace.add("expand", "query expansion", (time.perf_counter() - start) * 1000, queries=[], failed=True)
-        return []
-    queries = [q for q in dict.fromkeys(alternatives) if q != query][: config.EXPANDED_QUERIES]
-    if trace:
-        trace.add("expand", "query expansion", (time.perf_counter() - start) * 1000, queries=queries)
-    return queries
 
 
 def _passes(messages: list[dict]) -> bool:
@@ -177,21 +163,26 @@ def _unflagged(sources: list[dict], messages_for: Callable[[list[dict]], list[di
     return _unflagged(sources[:middle], messages_for) + _unflagged(sources[middle:], messages_for)
 
 
-def _guarded(sources: list[dict], messages_for: Callable[[list[dict]], list[dict]], trace: Trace | None = None) -> Iterator[str]:
+def _guarded(
+    chunks: list[dict], messages_for: Callable[[list[dict]], list[dict]], trace: Trace | None = None, sources: list[dict] | None = None
+) -> Iterator[str]:
     """Stream the answer. If Azure's content filter refuses the excerpts, answer without the flagged ones and say so.
 
-    `sources` is trimmed in place to the excerpts actually used, so the Sources list stays honest.
+    `chunks` is trimmed in place to the excerpts actually used, and so is `sources` (the Sources list), which stays honest.
     """
-    stream = openai_service.chat_stream(messages_for(sources))
+    stream = openai_service.chat_stream(messages_for(chunks))
     try:
         first = next(stream, None)
     except openai_service.ContentFilterError:
-        kept = _unflagged(sources, messages_for)
-        names = sorted({s["file_name"] for s in sources if s not in kept})
+        kept = _unflagged(chunks, messages_for)
+        names = sorted({s["file_name"] for s in chunks if s not in kept})
         log.warning("content filter refused excerpts from %s", names)
         if trace:
             trace.add("filter", "content filter", 0, left_out=names)
-        sources[:] = kept
+        chunks[:] = kept
+        if sources is not None:
+            used = {(chunk["file_name"], chunk["section"], chunk["page"]) for chunk in kept}
+            sources[:] = [source for source in sources if (source["file_name"], source["section"], source["page"]) in used]
         if not kept:
             yield "Azure's content safety filter refused every excerpt found for this question, so I cannot answer it."
             return
@@ -236,30 +227,29 @@ def ask(
     ws: Workspace,
     question: str,
     history: list[dict],
-    expand: bool = False,
     cache_answers: bool = False,
     on_step: Callable[[str], None] = lambda step: None,
     scope: list[str] | None = None,
 ) -> Answer:
     """Find the relevant CV chunks and start the answer. Returns the answer as a stream, its sources and its route.
 
-    expand=True also searches reworded queries. cache_answers=True reuses the answer to an identical question with an
-    identical chat. on_step is told each step as it starts (routing decision, searches, agent tool calls).
+    cache_answers=True reuses the answer to an identical question with an identical chat. on_step is told each step as it starts (routing decision, searches, agent tool calls).
     scope is a list of CV file names to answer from; empty or None means all CVs.
     """
+    openai_service.current_user.set(ws.user_id)  # this thread's chat calls count against this user (see openai_service.UserLimits)
     cache = cache_for(ws)  # this user's own: an answer cached for one user is never served to another
     question = question.strip()
     scope = sorted(set(scope or []))
-    trace = Trace(expand, cache_answers)
+    trace = Trace(cache_answers)
     key = token = None
     if cache_answers:
-        key = (question, tuple((m["role"], m["content"]) for m in _recent(history)), expand, tuple(scope))
+        key = (question, tuple((m["role"], m["content"]) for m in _recent(history)), tuple(scope))
         if (cached := cache.get(ANSWER, key)) is not None:
             trace.add("cache", "answer cache hit", trace.now_ms())
             trace.route = cached[2]
             return Answer(_timed(iter([cached[0]]), trace), cached[1], cached[2], trace)
         token = cache.token()
-    stream, sources, route, _ = _answer(ws, cache, question, history, expand, on_step, trace, scope)
+    stream, sources, route, _ = _answer(ws, cache, question, history, on_step, trace, scope)
     trace.route = route
     if cache_answers and route != "clarify":  # a clarifying question depends on the chat, so it is never reused
         stream = _remember(cache, stream, sources, route, key, token)
@@ -267,7 +257,7 @@ def ask(
 
 
 def _answer(
-    ws: Workspace, cache: Cache, question: str, history: list[dict], expand: bool, on_step: Callable[[str], None], trace: Trace, scope: list[str]
+    ws: Workspace, cache: Cache, question: str, history: list[dict], on_step: Callable[[str], None], trace: Trace, scope: list[str]
 ) -> Answer:
     route = _route(cache, question, history, trace)
     log.info("route=%s query=%r sections=%s", route.kind, route.query, route.sections)
@@ -284,31 +274,18 @@ def _answer(
     if route.kind == "clarify":  # nothing to search yet: ask what is missing
         on_step("The question needs more detail")
         return Answer(iter([route.ask]), [], "clarify")
-    if route.role:  # a specific role was asked for: it must exist in the CVs, and only the CVs that have it are used
-        on_step(f"Checking that the role '{route.role}' exists in the CVs")
+    scope, nothing_matches = _filter_cvs(ws, route, scope, on_step)
+    if nothing_matches:
+        return Answer(iter([nothing_matches]), [], "role_missing")
+    if route.kind == "complex" and not route.everyone:  # needs more than the best CVs: let the agent plan its own searches
+        on_step("Complex question: planning the searches")
         try:
-            have, titles = roles.find(ws, route.role, scope)
-        except Exception as error:  # the check only narrows the search, so a failure must never block the answer
-            log.warning("role check failed, answering without it: %s", error)
-        else:
-            if not have:
-                return Answer(iter([roles.missing_message(route.role, titles)]), [], "role_missing")
-            scope = have
-    sources = _everyone(ws, route, expand, scope, on_step, trace) if route.everyone else None
-    if sources is None:
-        if route.kind == "complex":  # needs more than the best chunks: let the agent plan its own searches
-            on_step("Complex question: planning the searches")
-            try:
-                return Answer(*agent.run(ws, route.query, _recent(history), on_step, trace, original=question, scope=scope), "complex")
-            except Exception as error:  # fall back to the plain flow rather than lose the answer
-                log.warning("agent failed, using a single search: %s", error)
-                trace.add("agent_model", "agent failed", 0, error=str(error).splitlines()[0] if str(error) else type(error).__name__)
-        if expand:
-            on_step("Rewording the question for a wider search")
-        queries = [route.query, *(_expand(route.query, trace) if expand else [])]
-        on_step(f"Searching the CVs with {len(queries)} quer{'y' if len(queries) == 1 else 'ies'}")
-        file_ids = [ingest.file_id_for(name) for name in scope] or None
-        sources = retrieval.retrieve(ws, queries, route.sections, trace, file_ids)
+            return Answer(*agent.run(ws, route.query, _recent(history), on_step, trace, original=question, scope=scope), "complex")
+        except Exception as error:  # fall back to the plain flow rather than lose the answer
+            log.warning("agent failed, using a single search: %s", error)
+            trace.add("agent_model", "agent failed", 0, error=str(error).splitlines()[0] if str(error) else type(error).__name__)
+    found = _read_cvs(ws, route, scope, on_step, trace)
+    context, sources = found.context, found.sources
     recent = _recent(history)
 
     def messages_for(chosen: list[dict]) -> list[dict]:
@@ -319,20 +296,33 @@ def _answer(
             {"role": "user", "content": f"CV excerpts:\n\n{excerpts}\n\nQuestion: {question}"},
         ]
 
-    return Answer(_guarded(sources, messages_for, trace), sources, "simple")
+    return Answer(_guarded(context, messages_for, trace, sources), sources, "simple")
 
 
-def _everyone(ws: Workspace, route: Route, expand: bool, scope: list[str], on_step: Callable[[str], None], trace: Trace) -> list[dict] | None:
-    """Excerpts for a question about everyone: a fixed number of candidates (top-k) instead of top-p, found in one search plus
-    a search for the CVs it missed. None when that is not possible (no CVs, or a failure), so the normal flow answers instead."""
+def _filter_cvs(ws: Workspace, route: Route, scope: list[str], on_step: Callable[[str], None]) -> tuple[list[str], str | None]:
+    """Narrow the CVs to those with the job title and the location the user asked for (see filters.find). Returns the CVs to use
+    and, when none matches, the reply that says what does exist. The check only narrows the search: a failure never blocks the answer."""
+    if not (route.role or route.location):
+        return scope, None
+    asked = " and ".join(part for part in (f"job title '{route.role}'" if route.role else "", f"location '{route.location}'" if route.location else "") if part)
+    on_step(f"Checking the CVs for the {asked}")
     try:
-        names = [name for name in ingest.list_cvs(ws) if not scope or name in scope]
-        if not names:
-            return None
-        on_step(f"Question about everyone: reading up to {min(config.TOP_K, len(names))} of {len(names)} CVs")
-        queries = [route.query, *(_expand(route.query, trace) if expand else [])]
-        sources = retrieval.retrieve_top_k(ws, queries, route.sections, {name: ingest.file_id_for(name) for name in names}, trace)
-        return sources or None
-    except Exception as error:  # this only widens the coverage, so a failure must never block the answer
-        log.warning("top-k retrieval failed, using the normal flow: %s", error)
-        return None
+        found = filters.find(ws, route.role, route.location, scope)
+    except Exception as error:
+        log.warning("filter check failed, answering without it: %s", error)
+        return scope, None
+    if not found.names:
+        return scope, filters.missing_message(route.role, route.location, found)
+    return found.names, None
+
+
+def _read_cvs(ws: Workspace, route: Route, scope: list[str], on_step: Callable[[str], None], trace: Trace) -> retrieval.Retrieved:
+    """The text for the answer: the sections of the top-k CVs that the search found. A question about everyone reads `top_k`
+    CVs, any other question `top_k_focused`. scope (the CVs the user chose) limits both the search and the CVs that can be read."""
+    names = [name for name in ingest.list_cvs(ws) if not scope or name in scope]
+    if not names:
+        return retrieval.Retrieved([], [])
+    k = settings.retrieval.top_k if route.everyone else settings.retrieval.top_k_focused
+    reading = f"reading the relevant sections of up to {min(k, len(names))} of {len(names)} CVs"
+    on_step(f"Question about everyone: {reading}" if route.everyone else f"Searching the CVs, {reading}")
+    return retrieval.retrieve(ws, route.query, route.sections, names, trace, k, scoped=bool(scope), only_sections=route.section_only)

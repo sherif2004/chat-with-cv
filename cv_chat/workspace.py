@@ -7,7 +7,7 @@ AZURE_SEARCH_INDEX are prefixes) plus the user's id.
 import uuid
 from dataclasses import dataclass
 
-from cv_chat import config
+from cv_chat.config import settings
 
 
 @dataclass(frozen=True)
@@ -15,7 +15,9 @@ class Workspace:
     user_id: str
 
     def __post_init__(self):
-        uuid.UUID(self.user_id)  # raises for anything that is not a UUID, so a name can never be built from free text
+        # raises for anything that is not a UUID, so a name can never be built from free text; kept in its one canonical form,
+        # so {..}, urn:uuid:.. and upper-case spellings give the same workspace and valid Azure names
+        object.__setattr__(self, "user_id", str(uuid.UUID(self.user_id)))
 
     @property
     def _suffix(self) -> str:
@@ -23,8 +25,8 @@ class Workspace:
 
     @property
     def container(self) -> str:
-        return f"{config.STORAGE_CONTAINER.lower()}-{self._suffix}"
+        return f"{settings.azure.storage_container.lower()}-{self._suffix}"
 
     @property
     def index(self) -> str:
-        return f"{config.SEARCH_INDEX.lower()}-{self._suffix}"
+        return f"{settings.azure.search_index.lower()}-{self._suffix}"
