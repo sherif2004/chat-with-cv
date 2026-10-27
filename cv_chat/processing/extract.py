@@ -12,7 +12,6 @@ from cv_chat.config import settings
 log = logging.getLogger(__name__)
 SUPPORTED = (".pdf", ".docx")
 _HEADING_ROLES = ("title", "sectionHeading")
-_SKIPPED_ROLES = ("pageNumber", "pageFooter")  # repeated on every page, not CV content
 
 
 @dataclass(frozen=True)
@@ -38,11 +37,17 @@ def _get_client():
     return _client
 
 
+def cache_path(data: bytes, version: int) -> Path:
+    """Where the extraction of this file is cached. The version is part of the name, so changing what is kept from a CV
+    (a new version number in the settings) never serves the output of the old rules."""
+    return Path(settings.extraction.cache_dir) / f"{hashlib.md5(data).hexdigest()}-v{version}.json"
+
+
 def extract_cv(file_name: str, data: bytes) -> ExtractedCV:
     """Azure Document Intelligence output, cached on disk by file content: changing the chunking never calls the service again."""
     if not file_name.lower().endswith(SUPPORTED):
         raise ValueError(f"Unsupported file type: {file_name} (expected PDF or DOCX)")
-    cache_file = Path(settings.extraction.cache_dir) / f"{hashlib.md5(data).hexdigest()}.json"
+    cache_file = cache_path(data, settings.extraction.version)
     try:
         cached = json.loads(cache_file.read_text())
         return ExtractedCV(pages=[(page, text) for page, text in cached["pages"]], headers=cached["headers"])
@@ -94,7 +99,31 @@ def _convert(file_name: str, data: bytes) -> ExtractedCV:
     from azure.ai.documentintelligence.models import AnalyzeDocumentRequest
 
     result = _get_client().begin_analyze_document("prebuilt-layout", AnalyzeDocumentRequest(bytes_source=data)).result()
+    extracted = assemble(result)
+    log.info("document intelligence: %s -> %d page(s), %d header(s)", file_name, len(extracted.pages), len(extracted.headers))
+    return extracted
 
+
+def _page_at(result, offset: int) -> int:
+    for page in result.pages or []:
+        if any(span.offset <= offset < span.offset + span.length for span in page.spans or []):
+            return page.page_number
+    return 1
+
+
+def _uncovered(content: str, covered: list[tuple[int, int]]) -> list[tuple[int, str]]:
+    """(offset, text) of the stretches of the document text that no paragraph or table accounts for, such as a checkbox state."""
+    found, position = [], 0
+    for start, end in sorted(covered) + [(len(content), len(content))]:
+        if start > position and content[position:start].strip():
+            found.append((position, content[position:start]))
+        position = max(position, end)
+    return found
+
+
+def assemble(result) -> ExtractedCV:
+    """The text of every page in reading order. Nothing is dropped: page numbers, footers, and text that belongs to no
+    paragraph are kept, and a table becomes one markdown block in place of its cell paragraphs."""
     # (offset in the document text, page, text, is a heading): sorting by offset gives reading order
     items: list[tuple[int, int, str, bool]] = []
     table_spans: list[tuple[int, int]] = []
@@ -103,14 +132,18 @@ def _convert(file_name: str, data: bytes) -> ExtractedCV:
             continue
         table_spans.append((table.spans[0].offset, table.spans[0].offset + table.spans[0].length))
         items.append((table.spans[0].offset, table.bounding_regions[0].page_number, _table_markdown(table), False))
+    covered = list(table_spans)
     for paragraph in result.paragraphs or []:
-        if paragraph.role in _SKIPPED_ROLES or not paragraph.spans:
+        if not paragraph.spans:
             continue
         offset = paragraph.spans[0].offset
+        covered.append((offset, offset + paragraph.spans[0].length))
         if any(start <= offset < end for start, end in table_spans):
             continue  # already part of the table
-        page = paragraph.bounding_regions[0].page_number if paragraph.bounding_regions else 1
+        page = paragraph.bounding_regions[0].page_number if paragraph.bounding_regions else _page_at(result, offset)
         items.append((offset, page, " ".join(paragraph.content.split()), paragraph.role in _HEADING_ROLES))
+    for offset, text in _uncovered(result.content or "", covered):
+        items.append((offset, _page_at(result, offset), " ".join(text.split()), False))
 
     lines: dict[int, list[str]] = defaultdict(list)
     headers: list[str] = []
@@ -121,6 +154,4 @@ def _convert(file_name: str, data: bytes) -> ExtractedCV:
             headers.append(text)
         lines[page].append(text)
 
-    pages = [(page, "\n".join(texts)) for page, texts in sorted(lines.items())]
-    log.info("document intelligence: %s -> %d page(s), %d header(s)", file_name, len(pages), len(headers))
-    return ExtractedCV(pages=pages, headers=headers)
+    return ExtractedCV(pages=[(page, "\n".join(texts)) for page, texts in sorted(lines.items())], headers=headers)

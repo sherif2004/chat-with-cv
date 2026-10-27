@@ -76,6 +76,7 @@ class RetrievalSettings(_Group):
 
 class ExtractionSettings(_Group):
     cache_dir: str = ".cache/extracted"  # Document Intelligence output per file, so re-chunking skips the service call
+    version: int = Field(2, ge=1)  # bump when what is kept from a CV changes: cached output of the old rules is then ignored
 
 
 class EntitiesSettings(_Group):
