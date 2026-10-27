@@ -153,7 +153,7 @@ Each chunk stores the plain Blob address of its CV (`file_url`); the container i
 
 - One `IngestQueue` per user, all sharing one `ThreadPoolExecutor` of `cpu_count` workers (clamped to 2 to 8). The work is I/O-bound.
 - A job moves through `queued → processing (stage) → indexed | skipped | failed`. Stages shown live: *saving original → reading layout → reading name, title and contact → embedding → saving*.
-- The Library polls the job list every 2 seconds, and the sidebar shows a progress bar on every page while jobs run.
+- While CVs are being processed, the Library polls the job list every 2 seconds and the sidebar shows a progress bar on every page. When nothing is processing, nothing polls, so an idle tab costs nothing; starting an upload starts the polling again.
 - **One failing CV never stops the others** (a scanned PDF with no text, a bad name, a rate limit). A CV that fails after step 3 keeps its stored original, shows in the Library without details, and can be retried with **Re-index**.
 - On submit, if nothing is running, `remove_deleted_cvs` reads one row per indexed CV, compares it with the files in Blob Storage, and removes the chunks of every CV whose file is gone (for example deleted in the portal). Deleting a CV in the Library removes both its chunks and its file (`ingest.delete_cv`: the index first, then the blob, then the cache).
 - **Re-index** passes `data=None`, which downloads the stored original instead of asking for an upload. **Update outdated CVs** re-runs every stored CV; those already current are skipped by the hash check.
@@ -347,7 +347,7 @@ One private container per user (`<AZURE_STORAGE_CONTAINER>-<user id>`) holding t
 
 **Before exposing the app beyond your own machine:**
 
-- The session cookie is written by a small script in the page, so it is not `HttpOnly` or `Secure`. **Serve the app over HTTPS.**
+- The session cookie is written by a small script in the page, so it cannot be `HttpOnly` (Streamlit has no way to set that). It is marked `Secure` when the app is served over HTTPS (the address in the user's browser decides, also behind a proxy). **Serve the app over HTTPS.**
 - The Docker Postgres uses the password `cvchat` and listens only on `127.0.0.1`. Change the password in `docker-compose.yml` and `DATABASE_URL` if it is ever exposed.
 - Sign-up is open to anyone who can reach the app (until the cap), so put it behind your own access control before using real candidate data.
 - **Contact details are personal data.** Email, phone and location are stored as fields in the search index next to the CV text. Anyone with the search key can read them. CV pages are sent to Azure Document Intelligence for reading.
@@ -497,6 +497,7 @@ Settings are validated with pydantic ([`cv_chat/config.py`](cv_chat/config.py)).
 | `retrieval.source_chars` | `600` | A source (an excerpt in the Sources list, stored with the chat message) is cut to this many characters |
 | `retrieval.rrf_k` | `60` | Stands in for a missing relevance score (rank-based weight). Leave it |
 | `retrieval.embed_cache_size`, `cache.size` | `256` | Question embeddings kept in memory; entries per kind of cached result |
+| `cache.cv_list_seconds`, `cache.link_seconds`, `cache.links` | `60`, `600`, `2048` | How long the list of a user's CVs is kept (a change clears it at once), how long a signed CV link is reused (links are valid for an hour), and how many links are kept |
 | `agent.max_rounds` / `max_seconds` | `5` / `30` | Tool rounds and time budget of the agent |
 | `agent.per_cv_all` / `per_cv_some` / `per_cv_max` | `1` / `2` / `5` | Excerpts per CV from one `search_cvs` call |
 | `extraction.cache_dir` / `version` | `.cache/extracted` / `2` | Where extraction output is saved; bump the version when what is kept from a CV changes. Cached output of any other version is deleted the first time a CV is read after a start |

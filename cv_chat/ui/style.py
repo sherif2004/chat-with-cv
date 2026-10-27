@@ -8,10 +8,13 @@ LOGO = Path(__file__).with_name("assets") / "logo.svg"  # its animation lives in
 READING_WIDTH = "52rem"  # the chat is a comfortable reading column; the Candidates grid uses the full width
 
 
-def inject(reading_column: bool = False) -> None:
+def inject() -> None:
     st.html(_CSS)
-    if reading_column:
-        st.html(f"<style>[data-testid='stMainBlockContainer'] {{ max-width: {READING_WIDTH}; }}</style>")
+
+
+def reading_column() -> None:
+    """Narrow the main column to a comfortable reading width (the chat). Separate from inject, which is already on the page."""
+    st.html(f"<style>[data-testid='stMainBlockContainer'] {{ max-width: {READING_WIDTH}; }}</style>")
 
 
 def logo() -> None:

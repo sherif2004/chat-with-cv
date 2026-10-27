@@ -4,7 +4,6 @@ import streamlit as st
 
 from cv_chat.services import blob_storage, search_index
 from cv_chat.ui import states
-from cv_chat.ui.safe import esc
 from cv_chat.workspace import Workspace
 
 SORTS = {"Name": lambda c: (c["name"] or c["file_name"]).lower(), "Job title": lambda c: (c["title"] or "~").lower(), "Location": lambda c: (c["location"] or "~").lower()}

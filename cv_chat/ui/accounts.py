@@ -1,7 +1,8 @@
 """Login and sign-up screen, and the cookie that keeps a user logged in across page reloads.
 
 Streamlit can read cookies on the server (st.context.cookies) but cannot set them, so a tiny script in the page
-writes the cookie. It is therefore not HttpOnly; it holds a random token whose hash is the only thing stored server-side.
+writes the cookie. It is therefore not HttpOnly (Streamlit cannot set that), but it is marked Secure when the app is served over
+https; it holds a random token whose hash is the only thing stored server-side.
 """
 import json
 
@@ -34,8 +35,22 @@ def _provision(user: auth.User) -> None:
         raise
 
 
+def cookie_text(value: str, max_age: int, https: bool) -> str:
+    """The cookie as the browser stores it. Secure only over https: over plain http a browser would refuse to keep it."""
+    text = f"{COOKIE}={value}; path=/; max-age={max_age}; SameSite=Lax"
+    return text + "; Secure" if https else text
+
+
+def _served_over_https() -> bool:
+    """True if the user's browser reached the app over https (also behind a proxy: this is the address in the browser)."""
+    try:
+        return str(st.context.url or "").startswith("https://")
+    except Exception:  # outside a page run there is no address
+        return False
+
+
 def _write_cookie(value: str, max_age: int) -> None:
-    script = f"window.parent.document.cookie = {json.dumps(f'{COOKIE}={value}; path=/; max-age={max_age}; SameSite=Lax')};"
+    script = f"window.parent.document.cookie = {json.dumps(cookie_text(value, max_age, _served_over_https()))};"
     st.iframe(f"<script>{script}</script>", height=1)  # a fixed string built here: no user text goes into it
 
 

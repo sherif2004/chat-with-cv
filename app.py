@@ -57,6 +57,6 @@ with profile.phase(f"view: {view}"):
     elif view == "Library":
         library.render(ws, cvs)
     else:
-        style.inject(reading_column=True)
+        style.reading_column()
         chat.render(ws, cvs, has_cvs=bool(cvs))
 profile.finish()

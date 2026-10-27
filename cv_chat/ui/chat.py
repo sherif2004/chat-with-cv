@@ -196,13 +196,13 @@ def _details(key: str, trace: dict, sources: list[dict]) -> None:
 
 
 def _answer(ws: Workspace, question: str) -> None:
-    history = list(st.session_state.messages)
+    earlier = list(st.session_state.messages)
     _show(ws, {"role": "user", "content": question})
     with st.chat_message("assistant", avatar=AVATARS["assistant"]):
         try:
             with st.status("Reading your question...", expanded=True) as status:
                 stream, sources, route, trace = qa.ask(
-                    ws, question, history,
+                    ws, question, earlier,
                     cache_answers=st.session_state.get("cache_answers", False) and not st.session_state.pop("skip_cache_once", False), on_step=lambda step: st.write(safe.esc(step)),
                     scope=st.session_state.get("chat_scope", []),
                 )
