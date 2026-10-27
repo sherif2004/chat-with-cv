@@ -60,7 +60,7 @@ def process_cv(
     if not any(text.strip() for _, text in document.pages):
         raise ValueError("No text found (scanned PDF?)")
 
-    chunks = chunk_cv(document.pages, document.headers, settings.chunking.max_chars, settings.chunking.overlap)
+    chunks = chunk_cv(document.pages, document.headers)
     on_stage("reading name, title and contact")
     meta = entities.extract(document.pages)
     on_stage("embedding")

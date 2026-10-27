@@ -17,8 +17,8 @@ def test_loads_defaults(azure_env):
     settings = config.load(env_files=())
     assert settings.retrieval.top_k == 20
     assert settings.retrieval.top_k_focused == 3
-    assert settings.chunking.max_chars == 1500
-    assert settings.chunking.overlap == 300
+    assert settings.chunking.max_chars == 4000
+    assert settings.chunking.overlap == 400
     assert settings.azure.small_deployment == ""
 
 

@@ -34,7 +34,6 @@ from cv_chat.workspace import Workspace
 log = logging.getLogger(__name__)
 SEMANTIC_CONFIG = "default"
 SCORING_PROFILE = "cv"
-BOOSTED_SECTIONS = ["experience", "skills"]  # chunks from these sections rank a little higher for keyword matches
 META_FIELDS = ["candidate_name", "job_title", "email", "phone", "location"]
 ANALYZER = "en.microsoft"  # English stemming and stop words for keyword search ("built" also finds "building")
 
@@ -284,7 +283,7 @@ def hybrid_search(
         filter=section_filter,
         select=["file_name", "file_url", "section", "page", "content", *META_FIELDS],
         scoring_profile=SCORING_PROFILE,
-        scoring_parameters=[f"boostSections-{','.join(BOOSTED_SECTIONS)}"],
+        scoring_parameters=[f"boostSections-{','.join(settings.sections.boosted)}"],
         top=k,
     )
     try:

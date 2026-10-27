@@ -53,13 +53,42 @@ class _Group(BaseModel):
 
 
 class ChunkingSettings(_Group):
-    max_chars: int = Field(1500, ge=200)  # a section shorter than this stays one chunk
-    overlap: int = Field(300, ge=0)  # used only when a long section is split
+    max_chars: int = Field(4000, ge=200)  # a section shorter than this stays one chunk
+    overlap: int = Field(400, ge=0)  # used only when a long section is split
+    caps_headings: bool = True  # also treat a short ALL-CAPS line as a heading, for CVs whose headings the layout model missed
+    caps_max_words: int = Field(5, ge=1)
+    heading_max_chars: int = Field(40, ge=1)  # a longer line is never a heading
 
     @model_validator(mode="after")
     def _overlap_is_smaller(self) -> "ChunkingSettings":
         if self.overlap >= self.max_chars:
             raise ValueError("overlap must be smaller than max_chars")
+        return self
+
+
+class SectionsSettings(_Group):
+    # Standard section types and the heading keywords that make a heading one of them (see processing/sections.py).
+    # The order matters: the first type with a matching keyword wins, so "Programming Languages" is skills, not languages.
+    types: dict[str, list[str]] = {
+        "experience": ["experience", "employment", "work history", "career", "professional background", "internship"],
+        "education": ["education", "academic", "qualification", "degree", "universit"],
+        "skills": ["skill", "technolog", "competenc", "tools", "expertise", "tech stack", "programming", "technical"],
+        "projects": ["project"],
+        "summary": ["summary", "profile", "objective", "about"],
+        "certifications": ["certif", "licen", "award", "training"],
+        "languages": ["language"],
+        "contact": ["contact"],
+    }
+    boosted: list[str] = ["experience", "skills"]  # chunks from these sections rank a little higher for keyword matches
+
+    @model_validator(mode="after")
+    def _consistent(self) -> "SectionsSettings":
+        if "other" in self.types:
+            raise ValueError('"other" is the type of every unmatched heading; it cannot have keywords')
+        if any(not words or any(not word.strip() or word != word.lower() for word in words) for words in self.types.values()):
+            raise ValueError("every section type needs at least one lower-case keyword")
+        if not set(self.boosted) <= set(self.types):
+            raise ValueError("boosted sections must be section types")
         return self
 
 
@@ -103,6 +132,7 @@ class Settings(BaseSettings):
 
     azure: AzureSettings
     chunking: ChunkingSettings = ChunkingSettings()
+    sections: SectionsSettings = SectionsSettings()
     retrieval: RetrievalSettings = RetrievalSettings()
     extraction: ExtractionSettings = ExtractionSettings()
     entities: EntitiesSettings = EntitiesSettings()
