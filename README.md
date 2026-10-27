@@ -51,10 +51,17 @@ docker compose up --build
 
 Open <http://localhost:8501>, create an account, go to **Library**, upload CVs and press **Process CVs**.
 
-The image already contains the model that reads each candidate's name, title, email, phone and city (about 1.5 GB), so the
-app never downloads anything when it runs and the first CV is not slowed down. The first build takes a few minutes because
-it downloads PyTorch and that model once. Postgres starts with the app; its data and the extraction cache live in Docker
-volumes (`pgdata`, `appcache`) and survive restarts. `docker compose down -v` deletes them.
+The model that reads each candidate's name, title, email, phone and city (`urchade/gliner_medium-v2.1`, about 1.5 GB) is
+**not** in the image. `docker-compose.yml` mounts your computer's Hugging Face cache (`~/.cache/huggingface`) into the
+container, read-only, and tells the app to stay offline, so nothing is downloaded and the image stays small. To use another
+folder, set `HF_CACHE_DIR` in `.env`. The first build takes a few minutes because it downloads PyTorch once.
+
+If this computer has never run the model, fill the cache once, without Docker: `pip install gliner`, then
+`python -c "from gliner import GLiNER; GLiNER.from_pretrained('urchade/gliner_medium-v2.1')"`. Without the mount the model
+is downloaded into the container on the first CV and lost when the container is rebuilt.
+
+Postgres starts with the app; its data and the extraction cache live in Docker volumes (`pgdata`, `appcache`) and survive
+restarts. `docker compose down -v` deletes them.
 
 ### Without Docker
 
@@ -257,6 +264,7 @@ There are no automated tests in this repository.
 |---|---|
 | "Missing or invalid in .env: ..." | A setting is missing or out of range (the message names each one). Fix `.env` and restart |
 | "Could not reach Postgres" | Start it with `docker compose up -d postgres`, or fix `DATABASE_URL` |
+| "The NER model ... could not be loaded" (Docker) | The mounted Hugging Face cache has no copy of the model. Fill it once (see Quick start) or point `HF_CACHE_DIR` at the folder that has it |
 | "Azure OpenAI has no deployment named ..." | Use the deployment name from the portal, not the model name; check the endpoint and API version |
 | "The storage container ... was deleted a moment ago" | Azure is still removing a deleted container. Wait about a minute and try again |
 | A CV shows "No text found (scanned PDF?)" | The file has no readable text even after OCR |
