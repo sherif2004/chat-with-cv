@@ -7,7 +7,7 @@ AZURE_SEARCH_INDEX are prefixes) plus the user's id.
 import uuid
 from dataclasses import dataclass
 
-from cv_chat import config
+from cv_chat.config import settings
 
 
 @dataclass(frozen=True)
@@ -23,8 +23,8 @@ class Workspace:
 
     @property
     def container(self) -> str:
-        return f"{config.STORAGE_CONTAINER.lower()}-{self._suffix}"
+        return f"{settings.azure.storage_container.lower()}-{self._suffix}"
 
     @property
     def index(self) -> str:
-        return f"{config.SEARCH_INDEX.lower()}-{self._suffix}"
+        return f"{settings.azure.search_index.lower()}-{self._suffix}"

@@ -10,7 +10,7 @@ import logging
 import threading
 from functools import lru_cache
 
-from cv_chat import config
+from cv_chat.config import settings
 
 log = logging.getLogger(__name__)
 
@@ -47,10 +47,10 @@ def _model():
 
         import torch
 
-        return GLiNER.from_pretrained(config.NER_MODEL, map_location=_device(torch))
+        return GLiNER.from_pretrained(settings.entities.model, map_location=_device(torch))
     except Exception as error:
         raise RuntimeError(
-            f"The NER model '{config.NER_MODEL}' could not be loaded ({str(error).splitlines()[0] if str(error) else type(error).__name__}). "
+            f"The NER model '{settings.entities.model}' could not be loaded ({str(error).splitlines()[0] if str(error) else type(error).__name__}). "
             "Install the packages in requirements.txt and check the internet connection: the model is downloaded the first time."
         ) from error
 

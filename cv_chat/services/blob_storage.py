@@ -4,10 +4,10 @@ from datetime import datetime, timedelta, timezone
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.storage.blob import BlobSasPermissions, BlobServiceClient, ContainerClient, generate_blob_sas
 
-from cv_chat import config
+from cv_chat.config import settings
 from cv_chat.workspace import Workspace
 
-_service = BlobServiceClient.from_connection_string(config.STORAGE_CONNECTION_STRING)
+_service = BlobServiceClient.from_connection_string(settings.azure.storage_connection_string.get_secret_value())
 
 
 def _container(ws: Workspace) -> ContainerClient:

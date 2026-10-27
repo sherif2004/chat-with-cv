@@ -7,7 +7,7 @@ import threading
 import time
 from contextlib import contextmanager
 
-from cv_chat import config
+from cv_chat.config import settings
 
 
 class Trace:
@@ -48,8 +48,8 @@ class Trace:
             with self._lock:
                 busy_until = max((e["at_ms"] + e["ms"] for e in self._events), default=0)
             if self.first_token_ms > busy_until + 1:  # the model took this long to start writing
-                self.add("model", config.CHAT_DEPLOYMENT, self.first_token_ms - busy_until, note="until its first word")
-            self.add("generate", config.CHAT_DEPLOYMENT, self.total_ms - self.first_token_ms)
+                self.add("model", settings.azure.chat_deployment, self.first_token_ms - busy_until, note="until its first word")
+            self.add("generate", settings.azure.chat_deployment, self.total_ms - self.first_token_ms)
 
     def to_dict(self) -> dict:
         """Plain data (kept with the chat message and drawn by ui/details.py)."""
@@ -58,5 +58,5 @@ class Trace:
         return {
             "route": self.route, "total_ms": self.total_ms, "first_token_ms": self.first_token_ms, "events": events,
             "settings": self.settings,
-            "models": {"chat": config.CHAT_DEPLOYMENT, "embedding": config.EMBEDDING_DEPLOYMENT},
+            "models": {"chat": settings.azure.chat_deployment, "embedding": settings.azure.embedding_deployment},
         }

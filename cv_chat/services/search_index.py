@@ -27,7 +27,7 @@ from azure.search.documents.indexes.models import (
 )
 from azure.search.documents.models import VectorizedQuery
 
-from cv_chat import config
+from cv_chat.config import settings
 from cv_chat.workspace import Workspace
 
 log = logging.getLogger(__name__)
@@ -37,13 +37,13 @@ BOOSTED_SECTIONS = ["experience", "skills"]  # chunks from these sections rank a
 META_FIELDS = ["candidate_name", "job_title", "email", "phone", "location"]
 ANALYZER = "en.microsoft"  # English stemming and stop words for keyword search ("built" also finds "building")
 
-_credential = AzureKeyCredential(config.SEARCH_KEY)
-_index_client = SearchIndexClient(config.SEARCH_ENDPOINT, _credential)
+_credential = AzureKeyCredential(settings.azure.search_key.get_secret_value())
+_index_client = SearchIndexClient(settings.azure.search_endpoint, _credential)
 
 
 @lru_cache(maxsize=64)
 def _search_client_for(index: str) -> SearchClient:
-    return SearchClient(config.SEARCH_ENDPOINT, index, _credential)
+    return SearchClient(settings.azure.search_endpoint, index, _credential)
 
 
 def _client(ws: Workspace) -> SearchClient:

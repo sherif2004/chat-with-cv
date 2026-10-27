@@ -9,7 +9,7 @@ from collections import OrderedDict
 from collections.abc import Hashable
 from typing import Any
 
-from cv_chat import config
+from cv_chat.config import settings
 from cv_chat.workspace import Workspace
 
 ROUTE, SEARCH, ANSWER, CHAT = "route", "search", "answer", "chat"
@@ -63,5 +63,5 @@ def cache_for(ws: Workspace) -> Cache:
     """The cache of one user."""
     with _caches_lock:
         if ws.user_id not in _caches:
-            _caches[ws.user_id] = Cache(config.CACHE_SIZE)
+            _caches[ws.user_id] = Cache(settings.cache.size)
         return _caches[ws.user_id]

@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from cv_chat import config
+from cv_chat.config import settings
 from cv_chat.processing.sections import SECTION_TYPES
 from cv_chat.rag import agent, ingest, retrieval, roles
 from cv_chat.rag.cache import ANSWER, CHAT, ROUTE, Cache, cache_for
@@ -56,7 +56,7 @@ Given the chat so far and the latest message, reply with JSON: {{"route": "...",
 - "ask": for "clarify" only, one short question that gets the missing detail, in the language of the message. "" otherwise."""
 
 EXPAND_PROMPT = f"""You help search a set of candidate CVs. Given a search query, reply with JSON: {{"queries": ["...", "..."]}}
-with exactly {config.EXPANDED_QUERIES} alternative queries that look for the same thing:
+with exactly {settings.retrieval.expanded_queries} alternative queries that look for the same thing:
 1. keywords only: the key skills, job titles, technologies and names, no filler words;
 2. worded the way a CV would say it (for "built APIs" write "designed and developed REST services").
 Keep every name and number from the query. Do not add requirements the query does not have."""
@@ -129,8 +129,8 @@ def _recent(history: list[dict]) -> list[dict]:
     """Recent turns let follow-up questions refer back to earlier answers."""
     chosen, used = [], 0
     for message in reversed(history):  # newest first, as many as fit the budget; the latest message always goes in
-        text = message["content"] if chosen else message["content"][-config.HISTORY_CHARS :]
-        if chosen and used + len(text) > config.HISTORY_CHARS:
+        text = message["content"] if chosen else message["content"][-settings.retrieval.history_chars :]
+        if chosen and used + len(text) > settings.retrieval.history_chars:
             break
         chosen.append({"role": message["role"], "content": text})
         used += len(text)
@@ -149,7 +149,7 @@ def _expand(query: str, trace: Trace | None = None) -> list[str]:
         if trace:
             trace.add("expand", "query expansion", (time.perf_counter() - start) * 1000, queries=[], failed=True)
         return []
-    queries = [q for q in dict.fromkeys(alternatives) if q != query][: config.EXPANDED_QUERIES]
+    queries = [q for q in dict.fromkeys(alternatives) if q != query][: settings.retrieval.expanded_queries]
     if trace:
         trace.add("expand", "query expansion", (time.perf_counter() - start) * 1000, queries=queries)
     return queries
@@ -329,7 +329,7 @@ def _everyone(ws: Workspace, route: Route, expand: bool, scope: list[str], on_st
         names = [name for name in ingest.list_cvs(ws) if not scope or name in scope]
         if not names:
             return None
-        on_step(f"Question about everyone: reading up to {min(config.TOP_K, len(names))} of {len(names)} CVs")
+        on_step(f"Question about everyone: reading up to {min(settings.retrieval.top_k, len(names))} of {len(names)} CVs")
         queries = [route.query, *(_expand(route.query, trace) if expand else [])]
         sources = retrieval.retrieve_top_k(ws, queries, route.sections, {name: ingest.file_id_for(name) for name in names}, trace)
         return sources or None

@@ -8,12 +8,12 @@ from functools import lru_cache
 
 from openai import APIConnectionError, APITimeoutError, AzureOpenAI, BadRequestError, InternalServerError, NotFoundError, RateLimitError
 
-from cv_chat import config
+from cv_chat.config import settings
 
 _client = AzureOpenAI(
-    azure_endpoint=config.OPENAI_ENDPOINT,
-    api_key=config.OPENAI_API_KEY,
-    api_version=config.OPENAI_API_VERSION,
+    azure_endpoint=settings.azure.openai_endpoint,
+    api_key=settings.azure.openai_api_key.get_secret_value(),
+    api_version=settings.azure.openai_api_version,
     max_retries=5,  # the SDK backs off on 429s, which parallel ingestion can trigger
 )
 log = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ def _explain_404(deployment: str, call: Callable):
         raise
     except NotFoundError as error:
         raise RuntimeError(
-            f"Azure OpenAI has no deployment named '{deployment}' at {config.OPENAI_ENDPOINT}. "
+            f"Azure OpenAI has no deployment named '{deployment}' at {settings.azure.openai_endpoint}. "
             "Use the deployment name (not the model name) exactly as in the portal, and check AZURE_OPENAI_ENDPOINT "
             "and AZURE_OPENAI_API_VERSION in .env."
         ) from error
@@ -109,8 +109,8 @@ def _embed_request(batch: list[str]):
         rate_limited = False
         try:
             return _explain_404(
-                config.EMBEDDING_DEPLOYMENT,
-                lambda: _client.with_options(max_retries=0).embeddings.create(model=config.EMBEDDING_DEPLOYMENT, input=batch),
+                settings.azure.embedding_deployment,
+                lambda: _client.with_options(max_retries=0).embeddings.create(model=settings.azure.embedding_deployment, input=batch),
             )
         except RateLimitError as error:
             rate_limited, wait = True, _wait_seconds(error, attempt)
@@ -150,7 +150,7 @@ def embed(texts: list[str]) -> list[list[float]]:
 
 
 def chat(messages: list[dict], json_mode: bool = False, deployment: str | None = None) -> str:
-    deployment = deployment or config.CHAT_DEPLOYMENT
+    deployment = deployment or settings.azure.chat_deployment
     kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
     response = _explain_404(
         deployment,
@@ -161,7 +161,7 @@ def chat(messages: list[dict], json_mode: bool = False, deployment: str | None =
 
 def suggest_title(question: str, answer: str) -> str | None:
     """A short name for a new chat, written by the small model. None if no small model is set or it fails: the caller keeps the question."""
-    if not config.TITLE_DEPLOYMENT:
+    if not settings.azure.small_deployment:
         return None
     try:
         title = chat(
@@ -169,7 +169,7 @@ def suggest_title(question: str, answer: str) -> str | None:
                 {"role": "system", "content": "Name this chat in 2 to 6 words, in the language of the question. Reply with the name only: no quotes, no full stop."},
                 {"role": "user", "content": f"Question: {question[:500]}\n\nAnswer: {answer[:600]}"},
             ],
-            deployment=config.TITLE_DEPLOYMENT,
+            deployment=settings.azure.small_deployment,
         )
     except Exception as error:  # a chat name is a nicety: never lose the answer over it
         log.warning("naming the chat with the small model failed: %s", str(error).splitlines()[0][:150])
@@ -185,9 +185,9 @@ def chat_with_tools(messages: list[dict], tools: list[dict], timeout: float | No
     ("calls", [{"id", "name", "arguments"}, ...]) when the model asked for tools instead.
     """
     stream = _explain_404(
-        config.CHAT_DEPLOYMENT,
+        settings.azure.chat_deployment,
         lambda: _client.chat.completions.create(
-            model=config.CHAT_DEPLOYMENT, messages=messages, tools=tools, stream=True, timeout=timeout
+            model=settings.azure.chat_deployment, messages=messages, tools=tools, stream=True, timeout=timeout
         ),
     )
     calls: dict[int, dict] = {}
@@ -216,8 +216,8 @@ def _continue(first: str, stream) -> Iterator[str]:
 def chat_stream(messages: list[dict]) -> Iterator[str]:
     """Yield the answer piece by piece as the model writes it."""
     stream = _explain_404(
-        config.CHAT_DEPLOYMENT,
-        lambda: _client.chat.completions.create(model=config.CHAT_DEPLOYMENT, messages=messages, stream=True),
+        settings.azure.chat_deployment,
+        lambda: _client.chat.completions.create(model=settings.azure.chat_deployment, messages=messages, stream=True),
     )
     for chunk in stream:
         if chunk.choices and chunk.choices[0].delta.content:  # some chunks carry only filter metadata

@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from collections.abc import Callable
 
-from cv_chat import config
+from cv_chat.config import settings
 from cv_chat.processing import chunking, entities, extract, sections
 from cv_chat.processing.chunking import chunk_cv
 from cv_chat.processing.extract import extract_cv
@@ -34,7 +34,7 @@ def validate_file_name(file_name: str) -> None:
 @lru_cache(maxsize=1)
 def _pipeline_fingerprint() -> bytes:
     """Changes whenever the extraction or chunking code or its settings change, so those CVs get re-indexed by themselves."""
-    digest = hashlib.md5(f"{config.CHUNK_SIZE}/{config.CHUNK_OVERLAP}/{INDEX_VERSION}".encode())
+    digest = hashlib.md5(f"{settings.chunking.max_chars}/{settings.chunking.overlap}/{INDEX_VERSION}".encode())
     for module in (extract, chunking, sections, entities):
         digest.update(Path(module.__file__).read_bytes())
     return digest.digest()
@@ -65,7 +65,7 @@ def process_cv(
     if not any(text.strip() for _, text in document.pages):
         raise ValueError("No text found (scanned PDF?)")
 
-    chunks = chunk_cv(document.pages, document.headers, config.CHUNK_SIZE, config.CHUNK_OVERLAP)
+    chunks = chunk_cv(document.pages, document.headers, settings.chunking.max_chars, settings.chunking.overlap)
     on_stage("reading name, title and contact")
     meta = entities.extract(document.pages)
     on_stage("embedding")

@@ -3,7 +3,7 @@ import json
 import time
 from collections.abc import Callable, Iterator
 
-from cv_chat import config
+from cv_chat.config import settings
 from cv_chat.rag import ingest, metadata, retrieval
 from cv_chat.rag.trace import Trace
 from cv_chat.services import openai_service, search_index
@@ -112,7 +112,7 @@ class _Run:
         file_ids = [ingest.file_id_for(name) for name in cvs] or None
         where = search_index.metadata_filter(job_title)
         per_cv = min(max(int(per_cv or (2 if cvs else 1)), 1), 5)
-        results = retrieval.spread_over_cvs(retrieval.search(self.ws, query, [], file_ids, where, self.trace), per_cv, config.CONTEXT_CHARS // 2)
+        results = retrieval.spread_over_cvs(retrieval.search(self.ws, query, [], file_ids, where, self.trace), per_cv, settings.retrieval.context_chars // 2)
         found = len({chunk["file_name"] for chunk in results})
         note = " (metadata filter applied)" if where else ""
         return f"{found} CV{'' if found == 1 else 's'} matched{note}.\n\n" + self._show(results)
@@ -127,7 +127,7 @@ class _Run:
         shown, size = [], 0
         for chunk in chunks:  # whole excerpts only, so a closing tag is never cut off
             size += len(chunk["content"])
-            if shown and size > config.CONTEXT_CHARS // 2:
+            if shown and size > settings.retrieval.context_chars // 2:
                 break
             shown.append(chunk)
         text = self._show(shown)
@@ -145,8 +145,8 @@ def run(
         f"{question}\n\n(The user's original message, whose language your answer must use: {original})"
     )
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, *recent, {"role": "user", "content": asked}]
-    deadline = time.monotonic() + config.AGENT_MAX_SECONDS
-    for round_number in range(1, config.AGENT_MAX_ROUNDS + 1):
+    deadline = time.monotonic() + settings.agent.max_seconds
+    for round_number in range(1, settings.agent.max_rounds + 1):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break

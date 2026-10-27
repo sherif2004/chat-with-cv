@@ -7,7 +7,7 @@ from pathlib import Path
 from collections import defaultdict
 from dataclasses import dataclass
 
-from cv_chat import config
+from cv_chat.config import settings
 
 log = logging.getLogger(__name__)
 SUPPORTED = (".pdf", ".docx")
@@ -34,7 +34,7 @@ def _get_client():
         from azure.ai.documentintelligence import DocumentIntelligenceClient
         from azure.core.credentials import AzureKeyCredential
 
-        _client = DocumentIntelligenceClient(config.DOCINTEL_ENDPOINT, AzureKeyCredential(config.DOCINTEL_KEY))
+        _client = DocumentIntelligenceClient(settings.azure.docintel_endpoint, AzureKeyCredential(settings.azure.docintel_key.get_secret_value()))
     return _client
 
 
@@ -42,7 +42,7 @@ def extract_cv(file_name: str, data: bytes) -> ExtractedCV:
     """Azure Document Intelligence output, cached on disk by file content: changing the chunking never calls the service again."""
     if not file_name.lower().endswith(SUPPORTED):
         raise ValueError(f"Unsupported file type: {file_name} (expected PDF or DOCX)")
-    cache_file = Path(config.EXTRACT_CACHE_DIR) / f"{hashlib.md5(data).hexdigest()}.json"
+    cache_file = Path(settings.extraction.cache_dir) / f"{hashlib.md5(data).hexdigest()}.json"
     try:
         cached = json.loads(cache_file.read_text())
         return ExtractedCV(pages=[(page, text) for page, text in cached["pages"]], headers=cached["headers"])

@@ -7,7 +7,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
-from cv_chat import config
+from cv_chat.config import settings
 from cv_chat.rag import metadata
 from cv_chat.rag.cache import SEARCH, cache_for
 from cv_chat.rag.trace import Trace
@@ -15,7 +15,7 @@ from cv_chat.services import openai_service, search_index
 from cv_chat.workspace import Workspace
 
 
-@lru_cache(maxsize=config.EMBED_CACHE_SIZE)
+@lru_cache(maxsize=settings.retrieval.embed_cache_size)
 def embed_question(question: str) -> tuple[float, ...]:
     """Cached in memory: asking the same question again skips the embedding call."""
     return tuple(openai_service.embed([question])[0])
@@ -55,7 +55,7 @@ def fuse(result_lists: list[list[dict]]) -> list[dict]:
     for results in result_lists:
         for rank, result in enumerate(results, start=1):
             key = (result["file_name"], result["section"], result["page"], result["content"])
-            scores[key] += 1 / (config.RRF_K + rank)
+            scores[key] += 1 / (settings.retrieval.rrf_k + rank)
             if key not in chunks or (result.get("score") or 0) > (chunks[key].get("score") or 0):
                 chunks[key] = result  # keep the copy with the highest relevance score
     return [chunks[key] for key, _ in scores.most_common()]
@@ -76,7 +76,7 @@ def retrieve(
 
 def retrieve_top_k(
     ws: Workspace, queries: list[str], sections: list[str], cvs: dict[str, str], trace: Trace | None = None,
-    k: int = config.TOP_K, budget: int = config.CONTEXT_CHARS,
+    k: int = settings.retrieval.top_k, budget: int = settings.retrieval.context_chars,
 ) -> list[dict]:
     """For a question about everyone (a comparison, a ranking): a fixed number of candidates instead of top-p, so none is dropped
     for scoring lower than the best. `cvs` maps each candidate's file name to its file id.
@@ -88,7 +88,7 @@ def retrieve_top_k(
         with ThreadPoolExecutor(max_workers=len(queries)) as pool:
             results = fuse(list(pool.map(lambda query: search(ws, query, sections, None, trace=trace), queries)))
     aim = min(k, len(cvs))
-    for _ in range(config.COVER_ROUNDS):
+    for _ in range(settings.retrieval.cover_rounds):
         found = {result["file_name"] for result in results}
         missing = [file_id for name, file_id in cvs.items() if name not in found]
         if len(found) >= aim or not missing:
@@ -123,10 +123,10 @@ def _hybrid(ws: Workspace, query: str, vector: list[float], sections: list[str],
     """When the router picked sections, search those sections and everything at the same time and merge the two lists, so
     a CV with unusual headings is still found and no "too few hits" threshold is needed."""
     if not sections:
-        return search_index.hybrid_search(ws, query, vector, config.RETRIEVE_K, file_ids=file_ids, where=where)
+        return search_index.hybrid_search(ws, query, vector, settings.retrieval.search_k, file_ids=file_ids, where=where)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        focused = pool.submit(search_index.hybrid_search, ws, query, vector, config.RETRIEVE_K, sections, file_ids, where)
-        everything = pool.submit(search_index.hybrid_search, ws, query, vector, config.RETRIEVE_K, None, file_ids, where)
+        focused = pool.submit(search_index.hybrid_search, ws, query, vector, settings.retrieval.search_k, sections, file_ids, where)
+        everything = pool.submit(search_index.hybrid_search, ws, query, vector, settings.retrieval.search_k, None, file_ids, where)
         return fuse([focused.result(), everything.result()])
 
 
@@ -135,7 +135,7 @@ def _weights(results: list[dict]) -> list[float]:
     returned none) the rank stands in for them, which makes every result look about equally relevant."""
     scores = [result.get("score") for result in results]
     if not results or any(score is None or score <= 0 for score in scores):
-        scores = [1 / (config.RRF_K + rank) for rank in range(1, len(results) + 1)]
+        scores = [1 / (settings.retrieval.rrf_k + rank) for rank in range(1, len(results) + 1)]
     best = max(scores)
     return [score / best for score in scores]
 
@@ -161,7 +161,7 @@ def _nucleus(weights: list[float], top_p: float, temperature: float) -> int:
     return len(weights)
 
 
-def rank_cvs(results: list[dict], top_p: float = config.TOP_P, budget: int = config.CONTEXT_CHARS) -> list[dict]:
+def rank_cvs(results: list[dict], top_p: float = settings.retrieval.top_p, budget: int = settings.retrieval.context_chars) -> list[dict]:
     """Keep what is relevant instead of a fixed number. Top-p is applied twice:
     - candidates: a CV is as relevant as its best chunk; the best CVs are kept until they hold `top_p` of the relevance,
       so a question about one person keeps one or two and a broad question keeps many;

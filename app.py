@@ -1,8 +1,10 @@
 """Chat with CVs: Streamlit entry point. Run with `streamlit run app.py`."""
 import streamlit as st
+from pydantic import ValidationError
 
 st.set_page_config(page_title="CV Lens · Chat with your CVs", page_icon="cv_chat/ui/assets/icon.png", layout="wide")
 
+from cv_chat.settings_error import describe
 from cv_chat.ui import accounts, profile, states, style  # none of these needs the Azure settings, so the error screens below always work
 
 profile.start()  # timing of this page run, only when the app was started with CV_PROFILE=1
@@ -17,8 +19,8 @@ try:
         from cv_chat.workspace import Workspace
         from cv_chat.rag import ingest
         from cv_chat.ui import candidates, chat, library, sidebar
-except KeyError as missing:  # config.py raises KeyError for a value missing from .env
-    states.error(f"Missing {missing} in .env. Copy .env.example to .env, fill in your Azure values and restart the app.", "Check again")
+except ValidationError as problems:  # config.py raises it for a value missing from .env or out of range
+    states.error(f"Missing or invalid in .env: {describe(problems)}. Copy .env.example to .env, fill in your Azure values and restart the app.", "Check again")
     st.stop()
 except Exception as error:  # for example a malformed storage connection string
     states.error(f"Could not connect to Azure: {error}. Check the values in .env.", "Try again")
