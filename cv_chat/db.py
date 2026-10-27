@@ -1,9 +1,7 @@
 """Postgres access: accounts and sessions now, chat history later. Separate from config.py so it needs no Azure values."""
-import os
-
 from psycopg_pool import ConnectionPool
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://cvchat:cvchat@localhost:5432/cvchat")  # tests point this at cvchat_test
+from cv_chat.account_config import accounts
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -48,7 +46,7 @@ _pool: ConnectionPool | None = None
 def pool() -> ConnectionPool:
     global _pool
     if _pool is None:
-        _pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=5, open=True)
+        _pool = ConnectionPool(accounts.database_url, min_size=1, max_size=accounts.pool_max, open=True)
     return _pool
 
 

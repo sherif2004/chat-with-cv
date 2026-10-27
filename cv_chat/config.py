@@ -6,14 +6,13 @@ that names all of it; settings_error.describe turns it into a message for the sc
 """
 import os
 import re
-from pathlib import Path
 from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-ROOT = Path(__file__).resolve().parent.parent
-ENV_FILES = (".env", ROOT / ".env")
+from cv_chat.config_files import ENV_FILES
+
 
 
 def _alias(name: str) -> AliasChoices:
@@ -170,6 +169,9 @@ class IngestSettings(_Group):
 class AgentSettings(_Group):
     max_rounds: int = Field(5, ge=1)  # tool-using rounds the agent may take for one complex question
     max_seconds: int = Field(30, ge=1)  # time budget for those rounds; afterwards it answers from what it has found
+    per_cv_all: int = Field(1, ge=1)  # excerpts per CV from a search_cvs call over all CVs, so one search reaches many CVs
+    per_cv_some: int = Field(2, ge=1)  # ... when the call names CVs
+    per_cv_max: int = Field(5, ge=1)  # the most the model may ask for
 
 
 class CacheSettings(_Group):

@@ -40,9 +40,9 @@ TOOLS = [
             "cvs": {"type": "array", "items": {"type": "string"},
                     "description": "Only search these CV file names. Omit to search all CVs."},
             "job_title": {"type": "string", "description": "Only CVs whose job title contains all of these words, e.g. 'backend engineer'."},
-            "per_cv": {"type": "integer", "minimum": 1, "maximum": 5,
-                       "description": "Most excerpts per CV. Default 1 when searching all CVs, so one search reaches "
-                                      "many CVs; default 2 when cvs is given. Raise it to see more of each CV."},
+            "per_cv": {"type": "integer", "minimum": 1, "maximum": settings.agent.per_cv_max,
+                       "description": f"Most excerpts per CV. Default {settings.agent.per_cv_all} when searching all CVs, so one search reaches "
+                                      f"many CVs; default {settings.agent.per_cv_some} when cvs is given. Raise it to see more of each CV."},
         }, "required": ["query"]},
     }},
     {"type": "function", "function": {
@@ -111,7 +111,7 @@ class _Run:
         self.on_step(f"Searching: {query}" + (f" ({', '.join(limits)})" if limits else ""))
         file_ids = cvs or None
         where = search_index.metadata_filter(job_title)
-        per_cv = min(max(int(per_cv or (2 if cvs else 1)), 1), 5)
+        per_cv = min(max(int(per_cv or (settings.agent.per_cv_some if cvs else settings.agent.per_cv_all)), 1), settings.agent.per_cv_max)
         results = retrieval.spread_over_cvs(retrieval.search(self.ws, query, [], file_ids, where, self.trace), per_cv)
         found = len({chunk["file_name"] for chunk in results})
         note = " (metadata filter applied)" if where else ""

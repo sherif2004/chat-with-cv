@@ -7,7 +7,7 @@ import json
 
 import streamlit as st
 
-from cv_chat import auth, db
+from cv_chat import account_config, auth, db
 from cv_chat.ui import style
 
 COOKIE = "cv_session"
@@ -65,7 +65,7 @@ def current_user() -> auth.User:
     if token is None:
         st.stop()
     screen.empty()
-    _write_cookie(token, auth.SESSION_DAYS * 86400)  # no rerun: the script must stay on the page until the browser has run it
+    _write_cookie(token, account_config.accounts.session_days * 86400)  # no rerun: the script must stay on the page until the browser has run it
     st.session_state["user"], st.session_state["token"] = auth.user_for_token(token), token
     if new_code:
         st.session_state["recovery_code"] = new_code
@@ -111,7 +111,7 @@ def _login_screen() -> tuple[str | None, str | None]:
             with signup_tab, st.form("signup", border=False):
                 email = st.text_input("Email", key="signup_email", autocomplete="email")
                 password = st.text_input("Password", type="password", key="signup_password", autocomplete="new-password")
-                st.caption(f"At least {auth.MIN_PASSWORD} characters. A few words in a row make a strong, easy-to-remember password.")
+                st.caption(f"At least {account_config.accounts.min_password} characters. A few words in a row make a strong, easy-to-remember password.")
                 if st.form_submit_button("Create account", type="primary", width="stretch"):
                     try:
                         user = auth.sign_up(email, password, on_created=_provision)
@@ -122,7 +122,7 @@ def _login_screen() -> tuple[str | None, str | None]:
                 st.caption("Use the recovery code you were given when you created your account.")
                 email = st.text_input("Email", key="forgot_email", autocomplete="email")
                 code = st.text_input("Recovery code", key="forgot_code", placeholder="XXXX-XXXX-XXXX-XXXX")
-                password = st.text_input(f"New password (at least {auth.MIN_PASSWORD} characters)", type="password", key="forgot_password", autocomplete="new-password")
+                password = st.text_input(f"New password (at least {account_config.accounts.min_password} characters)", type="password", key="forgot_password", autocomplete="new-password")
                 if st.form_submit_button("Reset password", type="primary", width="stretch"):
                     try:
                         new_code = auth.reset_password(email, code, password)
@@ -161,7 +161,7 @@ def account_menu(user: auth.User) -> None:
         st.markdown("**Change password**")
         with st.form("change_password", clear_on_submit=True):
             current = st.text_input("Current password", type="password")
-            new = st.text_input(f"New password (at least {auth.MIN_PASSWORD} characters)", type="password")
+            new = st.text_input(f"New password (at least {account_config.accounts.min_password} characters)", type="password")
             if st.form_submit_button("Change password"):
                 try:
                     auth.change_password(user.id, current, new, keep_token=st.session_state.get("token"))

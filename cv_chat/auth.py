@@ -14,10 +14,8 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
 
 from cv_chat import db
+from cv_chat.account_config import accounts as cfg
 
-MAX_USERS = 15  # one Azure AI Search index per user, and the Basic tier allows 15
-MIN_PASSWORD = 8
-SESSION_DAYS = 14
 
 _hasher = PasswordHasher()
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -44,13 +42,13 @@ def sign_up(email: str, password: str, on_created: Callable[[User], None] | None
     email = email.strip().lower()
     if not _EMAIL.match(email) or len(email) > 254:
         raise AuthError("Enter a valid email address.")
-    if len(password) < MIN_PASSWORD:
-        raise AuthError(f"The password needs at least {MIN_PASSWORD} characters.")
+    if len(password) < cfg.min_password:
+        raise AuthError(f"The password needs at least {cfg.min_password} characters.")
     password_hash = _hasher.hash(password)
     with db.pool().connection() as conn:
         conn.execute("SELECT pg_advisory_xact_lock(1)")  # one sign-up at a time, so the user cap cannot be passed
-        if conn.execute("SELECT count(*) FROM users").fetchone()[0] >= MAX_USERS:
-            raise AuthError(f"Sign-ups are closed: this demo allows {MAX_USERS} users.")
+        if conn.execute("SELECT count(*) FROM users").fetchone()[0] >= cfg.max_users:
+            raise AuthError(f"Sign-ups are closed: this demo allows {cfg.max_users} users.")
         if conn.execute("SELECT 1 FROM users WHERE email = %s", (email,)).fetchone():
             raise AuthError("An account with this email already exists.")
         user_id = conn.execute(
@@ -87,8 +85,8 @@ def reset_password(email: str, code: str, new_password: str) -> str:
     """Set a new password for someone who forgot theirs, using the recovery code from sign-up. Every session of the user
     is ended and a new recovery code is returned (the one just used no longer works)."""
     email = email.strip().lower()
-    if len(new_password) < MIN_PASSWORD:
-        raise AuthError(f"The new password needs at least {MIN_PASSWORD} characters.")
+    if len(new_password) < cfg.min_password:
+        raise AuthError(f"The new password needs at least {cfg.min_password} characters.")
     with db.pool().connection() as conn:
         row = conn.execute("SELECT id, recovery_hash FROM users WHERE email = %s", (email,)).fetchone()
         stored = row[1] if row and row[1] else _digest("no-recovery-code")  # compared anyway, so timing does not show who exists
@@ -113,8 +111,8 @@ def check_password(user_id: str, password: str) -> bool:
 
 def change_password(user_id: str, current: str, new: str, keep_token: str | None = None) -> None:
     """Set a new password after checking the current one. Every other session of the user is ended; keep_token stays."""
-    if len(new) < MIN_PASSWORD:
-        raise AuthError(f"The new password needs at least {MIN_PASSWORD} characters.")
+    if len(new) < cfg.min_password:
+        raise AuthError(f"The new password needs at least {cfg.min_password} characters.")
     with db.pool().connection() as conn:
         row = conn.execute("SELECT password_hash FROM users WHERE id = %s", (user_id,)).fetchone()
         try:
@@ -149,7 +147,7 @@ def log_in(email: str, password: str) -> str:
         token = secrets.token_urlsafe(32)
         conn.execute(
             "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (%s, %s, now() + make_interval(days => %s))",
-            (_digest(token), row[0], SESSION_DAYS),
+            (_digest(token), row[0], cfg.session_days),
         )
         conn.execute("DELETE FROM sessions WHERE expires_at < now()")
     return token
