@@ -12,7 +12,7 @@ from functools import lru_cache
 
 from cv_chat.config import settings
 from cv_chat.processing import entities
-from cv_chat.processing.chunking import chunk_cv
+from cv_chat.processing.chunking import Chunk, chunk_cv
 from cv_chat.processing.extract import extract_cv
 from cv_chat.processing.sections import section_type
 from cv_chat.rag.cache import CVS, cache_for
@@ -77,7 +77,7 @@ def process_cv(
 
     chunks = chunk_cv(document.pages, document.headers)
     on_stage("reading name, title and contact")
-    meta = entities.extract(chunks)
+    meta = entities.extract([Chunk("Other", page, text) for page, text in document.pages])
     on_stage("embedding")
     # Embed each chunk together with its file name, so chunks from later pages still point to the candidate.
     who = f"\nCandidate: {meta['candidate_name']}, {meta['job_title']}" if meta["candidate_name"] else ""

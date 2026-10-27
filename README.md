@@ -111,7 +111,7 @@ Everything else has a default and can be overridden in `.env` as `CVCHAT_<GROUP>
 | `agent.max_rounds` / `max_seconds` | 5 / 30 | Limits of the agent that handles complex questions |
 | `concurrency.*` | see file | Adaptive limits for Azure OpenAI calls, a share kept free for questions while CVs are processed, calls one user may start at once, CVs processed in parallel |
 | `cache.*` | see file | Sizes and lifetimes of the caches |
-| `ingest.pipeline_version` | 2 | Bump after changing how a CV is processed: older CVs then show as outdated |
+| `ingest.pipeline_version` | 3 | Bump after changing how a CV is processed: older CVs then show as outdated |
 | `extraction.version` | 2 | Bump when what is kept from a CV changes: cached layouts of another version are deleted |
 | `index.version` | 3 | Bump when the stored fields change: every index is rebuilt from the stored CVs |
 | `accounts.max_users` | 15 | Sign-up cap (one search index per user) |
@@ -131,7 +131,8 @@ flowchart LR
     C -- no --> B["Original → Blob Storage"]
     B --> L["Layout → Document Intelligence<br/>(cached by content)"]
     L --> K["Chunks by section"]
-    K --> N["Name, title, email,<br/>phone, city → NER"]
+    L --> N["Contact context → GLiNER<br/>Email and phone → format checks"]
+    K --> E
     N --> E["Embeddings"]
     E --> I["Chunks → AI Search"]
 ```
@@ -143,9 +144,10 @@ flowchart LR
    Nothing is dropped (page numbers and footers stay). The result is cached on disk by content, so re-processing does not pay again.
 4. **Chunks by section.** Each section (a heading and what is under it) is one chunk that starts with its heading. Only a
    section longer than `chunking.max_chars` is split. Text before the first heading goes under *Other*.
-5. **Candidate details.** A named-entity model (GLiNER) is asked, one label at a time, for name, job title, email, phone and
-   city. The CV is read from the start; the first piece of text with an answer decides, a value is never replaced by a later
-   one, and reading stops when all five are found. There are no patterns or word lists. Years of experience are not read.
+5. **Candidate details.** Full extracted page text is used separately from search chunks. Email and phone formats identify
+   the contact block; GLiNER reads name, title and city in that context to avoid publication authors and workplace cities.
+   A missing title is sought in the remaining text. Unknown details stay empty. Consecutive headings are preserved in search
+   chunks, and long paragraphs are split into bounded NER windows. Years of experience are not read.
 6. **Embed and store.** Each chunk is embedded together with the file name and candidate, then uploaded. Old chunks of the
    same file are removed afterwards, so the CV is never missing from search.
 

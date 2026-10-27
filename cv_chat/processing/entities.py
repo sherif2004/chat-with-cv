@@ -1,16 +1,10 @@
-"""Candidate details read from a CV by a generic named-entity model (GLiNER). No model call to Azure, no patterns, no word
-lists: the model is asked for each detail by its plain-language label.
+"""Read candidate details locally, using contact context to disambiguate GLiNER entities.
 
-The CV is read in order, the way a person would: the first block (the header) first, then the next section, and so on. The
-first answer found for a detail is kept and never replaced, and reading stops as soon as every detail is filled or the CV
-ends. There are no rules about where a detail may be or what it looks like: only the labels and the threshold in the settings.
-
-Years of experience is not read at all: it is not written in the text of most CVs, it has to be worked out from which dates
-are jobs, and a generic NER cannot tell those from a degree's dates.
-
-If the model cannot be loaded, reading a CV fails with a clear message instead of quietly producing something worse.
+Email and phone have format checks; names and cities are selected near contact details,
+not from publication authors or employment history. Missing details remain empty.
 """
 import logging
+import re
 import threading
 from functools import lru_cache
 
@@ -58,7 +52,12 @@ def warm_up() -> None:
 def _windows(text: str) -> list[str]:
     """The text cut into pieces of about window_words words (what the model reads at a time), at line breaks."""
     pieces, current, words = [], [], 0
+    lines = []
     for line in text.split("\n"):
+        words_in_line = line.split()
+        limit = settings.entities.window_words
+        lines.extend(" ".join(words_in_line[i:i + limit]) for i in range(0, len(words_in_line), limit))
+    for line in lines:
         size = len(line.split())
         if current and words + size > settings.entities.window_words:
             pieces.append("\n".join(current))
@@ -75,26 +74,69 @@ def _clean(value: str) -> str:
     return " ".join(str(value or "").replace("<", " ").replace(">", " ").split())[: settings.entities.max_value_chars]
 
 
-def _best(model, text: str, label: str) -> dict | None:
-    """The model's most confident answer for a label in one text, or None if it has none above the threshold."""
-    with _lock:
-        answers = model.predict_entities(text, [label], threshold=settings.entities.threshold)
-    return max(answers, key=lambda entity: entity["score"], default=None)
-
-
 def extract(chunks: list[Chunk], model=None) -> dict:
-    """The candidate's name, job title, email, phone and location, with no rules of its own: the CV is read from the start to
-    the end, one piece after another, and each detail is asked of the model until it has an answer. The first piece that has
-    one decides (its most confident answer), and a detail that is found is never replaced by a later one. Reading stops as soon
-    as every detail is filled; if one never is, the whole CV is read."""
+    """Use unchunked page text when available, preserving the candidate's contact context."""
     model = model or _model()
-    found: dict[str, str] = {}
-    for chunk in chunks:
-        for window in _windows(chunk.text):
-            for key in [key for key in LABELS if key not in found]:
-                answer = _best(model, window, LABELS[key])
-                if answer:
-                    found[key] = answer["text"]
-            if len(found) == len(LABELS):
-                return {**EMPTY, **{key: _clean(text) for key, text in found.items()}}
-    return {**EMPTY, **{key: _clean(text) for key, text in found.items()}}
+    text = "\n".join(chunk.text for chunk in chunks)
+    lines = text.splitlines()
+    found = dict(EMPTY)
+    email = re.search(r"[\w.+%-]+@[\w.-]+\.[A-Za-z]{2,}", text)
+    # Phone numbers must contain 8-15 digits and cannot be a DOI, date or decimal.
+    phones = [m for m in re.finditer(r"(?<![\w./])\+?\d[\d ()-]{6,}\d(?![\w./])", text)
+              if 8 <= sum(c.isdigit() for c in m.group()) <= 15
+              and not re.search(r"\d{4}\s*-\s*\d{4}", m.group())]
+    anchor = email or (phones[0] if phones else None)
+    if anchor:
+        line_no = text[:anchor.start()].count("\n")
+        start, end = line_no, line_no + 1
+        while start > max(0, line_no - 12) and len(lines[start - 1].split()) <= 18:
+            start -= 1
+        while end < min(len(lines), line_no + 4) and len(lines[end].split()) <= 18:
+            end += 1
+        contact = "\n".join(lines[start:end])
+    else:
+        # With no contact anchor, only the opening block can identify the candidate.
+        contact = "\n".join(lines[:4])
+    if email:
+        found["email"] = email.group()
+    contact_phone = next((m.group() for m in phones if m.group() in contact), "")
+    found["phone"] = contact_phone
+    name_line = ""
+    for key in ("candidate_name", "location", "job_title"):
+        answers = []
+        offset = 0
+        for window in _windows(contact):
+            with _lock:
+                predictions = model.predict_entities(window, [LABELS[key]], threshold=settings.entities.threshold)
+            answers.extend({**a, "start": a.get("start", 0) + offset} for a in predictions)
+            offset += len(window) + 1
+        if answers:
+            answer = (min(answers, key=lambda a: a.get("start", 0)) if key == "job_title"
+                      else max(answers, key=lambda a: a["score"]))
+            found[key] = answer["text"]
+            if key == "candidate_name":
+                contact_lines = contact.splitlines()
+                index = next((i for i, line in enumerate(contact_lines) if answer["text"] in line), None)
+                if index is not None:
+                    name_line = contact_lines[index].strip()
+                    # Discard employment/publication text preceding the identity line.
+                    contact = "\n".join(contact_lines[index:])
+    if (name_line and 2 <= len(name_line.split()) <= 6
+            and all(c.isalpha() or c in " '-" for c in name_line)
+            and (not found["job_title"] or found["job_title"] not in name_line)):
+        found["candidate_name"] = name_line
+    if found["job_title"]:
+        # Keep qualifiers such as Junior when the model returns only part of a short title line.
+        for line in contact.splitlines():
+            if (found["job_title"] in line and found["candidate_name"] not in line
+                    and len(line.split()) <= 8 and all(c.isalpha() or c in " &/-" for c in line)):
+                found["job_title"] = line.strip()
+                break
+    if not found["job_title"]:
+        for window in _windows(text):
+            with _lock:
+                answers = model.predict_entities(window, [LABELS["job_title"]], threshold=settings.entities.threshold)
+            if answers:
+                found["job_title"] = min(answers, key=lambda a: a.get("start", 0))["text"]
+                break
+    return {key: _clean(value) for key, value in found.items()}

@@ -51,7 +51,7 @@ def chunk_cv(
 
     def emit() -> None:
         text = "\n".join(buf).strip()
-        if text:  # a heading with no body under it makes no chunk
+        if text or heading != "Other":
             blocks.append((heading, buf_page, text))
 
     for page_no, text in pages:
@@ -68,5 +68,5 @@ def chunk_cv(
     return [
         Chunk(head, page, window if head == "Other" else f"{head}\n{window}")
         for head, page, text in blocks
-        for window in _windows(text, max_chars, overlap)
+        for window in (_windows(text, max_chars, overlap) if text else [""])
     ]

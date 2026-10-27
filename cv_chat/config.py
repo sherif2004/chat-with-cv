@@ -175,7 +175,7 @@ class IndexSettings(_Group):
 
 
 class IngestSettings(_Group):
-    pipeline_version: int = Field(2, ge=1)  # bump when processing logic changes: CVs processed by an older version are re-indexed
+    pipeline_version: int = Field(3, ge=1)  # bump when processing logic changes: CVs processed by an older version are re-indexed
     max_name_bytes: int = Field(255, ge=1, le=255)  # a file name, in UTF-8; the search key made from it must stay under Azure's 1024 limit
 
 
